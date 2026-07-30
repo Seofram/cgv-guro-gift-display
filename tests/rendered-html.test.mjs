@@ -35,11 +35,23 @@ test("server-renders the CGV gift display shell", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
-test("keeps the Windows launcher and display controls in the package", async () => {
-  const [page, layout, launcher, bootstrap, packageJson] = await Promise.all([
+test("keeps the Windows launchers and display controls in the package", async () => {
+  const [
+    page,
+    layout,
+    launcher,
+    resetLauncher,
+    cleanLauncher,
+    cleanScript,
+    bootstrap,
+    packageJson,
+  ] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../start-local.bat", import.meta.url), "utf8"),
+    readFile(new URL("../reset-data.bat", import.meta.url), "utf8"),
+    readFile(new URL("../clean-uninstall.bat", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/clean-uninstall.ps1", import.meta.url), "utf8"),
     readFile(new URL("../scripts/bootstrap-node.ps1", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
@@ -49,7 +61,12 @@ test("keeps the Windows launcher and display controls in the package", async () 
   assert.match(page, /모니터링 열기/);
   assert.match(page, /전시 종료/);
   assert.match(launcher, /bootstrap-node\.ps1/i);
+  assert.match(resetLauncher, /reset-data\.ps1/i);
+  assert.match(cleanLauncher, /clean-uninstall\.ps1/i);
+  assert.match(cleanScript, /Assert-ChildPath/);
+  assert.match(cleanScript, /CGVGiftDisplay/);
+  assert.match(cleanScript, /node_modules/);
   assert.match(bootstrap, /\$nodeVersion = "22\.23\.2"/);
   assert.match(packageJson, /"name": "cgv-guro-gift-display"/);
-  assert.match(packageJson, /"version": "1\.0\.0"/);
+  assert.match(packageJson, /"version": "1\.1\.0"/);
 });

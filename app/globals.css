@@ -933,14 +933,37 @@ button {
 
 .admin-footer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
+  gap: 24px;
   padding: 22px 4px 0;
   color: #999;
   font-size: 12px;
 }
 
+.storage-notice {
+  display: grid;
+  gap: 4px;
+  max-width: 850px;
+  line-height: 1.55;
+}
+
+.storage-notice strong {
+  color: #333;
+  font-size: 13px;
+}
+
+.storage-notice p {
+  color: #666;
+}
+
+.storage-notice small {
+  color: #999;
+  font-size: 11px;
+}
+
 .admin-footer button {
+  flex: 0 0 auto;
   border: 0;
   background: transparent;
   color: #888;
@@ -1549,6 +1572,11 @@ body.display-mode {
 }
 
 @media (max-width: 620px) {
+  .admin-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .brand-lockup .eyebrow {
     display: none;
   }
