@@ -27,6 +27,6 @@ foreach ($connection in $connections) {
 $nodePath = (Get-Command node -ErrorAction Stop).Source
 Start-Process `
   -FilePath $nodePath `
-  -ArgumentList @($controllerPath) `
+  -ArgumentList @("--no-warnings", "`"$controllerPath`"") `
   -WorkingDirectory $projectDirectory `
   -WindowStyle Hidden

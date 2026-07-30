@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const PORT = Number(process.env.CGV_CONTROLLER_PORT || 3210);
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -10,12 +11,49 @@ const windowScript = join(scriptDirectory, "display-window.ps1");
 const runtimeDirectory = process.env.LOCALAPPDATA
   ? join(process.env.LOCALAPPDATA, "CGVGiftDisplay")
   : join(scriptDirectory, ".runtime");
-const dataFile = join(runtimeDirectory, "display-data.json");
+const databaseFile = join(runtimeDirectory, "inventory.db");
+const legacyDataFile = join(runtimeDirectory, "display-data.json");
+const resetMarkerFile = join(runtimeDirectory, "reset-data.flag");
 let actionInProgress = false;
 let displayExpected = null;
 let lastObservedRunning = null;
 let displayIncident = null;
 let lastSyncAt = null;
+let resetRequested = false;
+
+await mkdir(runtimeDirectory, { recursive: true });
+
+const database = new DatabaseSync(databaseFile);
+database.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  CREATE TABLE IF NOT EXISTS app_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`);
+
+const readStateStatement = database.prepare(
+  "SELECT payload, updated_at FROM app_state WHERE id = 1",
+);
+const writeStateStatement = database.prepare(`
+  INSERT INTO app_state (id, payload, updated_at)
+  VALUES (1, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    payload = excluded.payload,
+    updated_at = excluded.updated_at
+`);
+
+async function fileExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 function runWindowAction(action) {
   return new Promise((resolve, reject) => {
@@ -74,6 +112,35 @@ function isAppData(value) {
   );
 }
 
+function readStoredData() {
+  const row = readStateStatement.get();
+  if (!row) return null;
+  const data = JSON.parse(row.payload);
+  if (!isAppData(data)) throw new Error("invalid stored data");
+  return data;
+}
+
+function writeStoredData(data) {
+  writeStateStatement.run(JSON.stringify(data), data.updatedAt);
+  lastSyncAt = new Date().toISOString();
+}
+
+async function initializeStorage() {
+  resetRequested = await fileExists(resetMarkerFile);
+  if (resetRequested || readStateStatement.get()) return;
+
+  try {
+    const legacyData = JSON.parse(await readFile(legacyDataFile, "utf8"));
+    if (isAppData(legacyData)) writeStoredData(legacyData);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.error("Legacy data migration failed:", error);
+    }
+  }
+}
+
+await initializeStorage();
+
 const server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") {
     respond(response, 204, {});
@@ -82,14 +149,18 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "GET" && request.url === "/data") {
     try {
-      const storedData = JSON.parse(await readFile(dataFile, "utf8"));
+      const storedData = readStoredData();
+      if (!storedData) {
+        respond(response, 404, {
+          ok: false,
+          message: "no data",
+          reset: resetRequested,
+        });
+        return;
+      }
       respond(response, 200, { ok: true, data: storedData });
     } catch (error) {
-      if (error?.code === "ENOENT") {
-        respond(response, 404, { ok: false, message: "no data" });
-      } else {
-        respond(response, 500, { ok: false, message: "data read failed" });
-      }
+      respond(response, 500, { ok: false, message: "data read failed" });
     }
     return;
   }
@@ -101,9 +172,11 @@ const server = createServer(async (request, response) => {
         respond(response, 400, { ok: false, message: "invalid data" });
         return;
       }
-      await mkdir(runtimeDirectory, { recursive: true });
-      await writeFile(dataFile, JSON.stringify(nextData), "utf8");
-      lastSyncAt = new Date().toISOString();
+      writeStoredData(nextData);
+      resetRequested = false;
+      await unlink(resetMarkerFile).catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
       respond(response, 200, { ok: true });
     } catch (error) {
       respond(response, 400, {
@@ -144,7 +217,7 @@ const server = createServer(async (request, response) => {
 
       if (!lastSyncAt) {
         try {
-          lastSyncAt = (await stat(dataFile)).mtime.toISOString();
+          lastSyncAt = (await stat(databaseFile)).mtime.toISOString();
         } catch {
           lastSyncAt = null;
         }

@@ -252,16 +252,20 @@ export default function Home() {
 
     const hydrate = async () => {
       let controllerData: AppData | null = null;
+      let resetRequested = false;
       try {
         const response = await fetch(`${CONTROLLER_URL}/data`, {
           cache: "no-store",
         });
+        const result = (await response.json()) as {
+          ok: boolean;
+          data?: AppData;
+          reset?: boolean;
+        };
         if (response.ok) {
-          const result = (await response.json()) as {
-            ok: boolean;
-            data?: AppData;
-          };
           controllerData = result.data ?? null;
+        } else if (response.status === 404) {
+          resetRequested = Boolean(result.reset);
         }
       } catch {
         controllerData = null;
@@ -269,14 +273,10 @@ export default function Home() {
 
       if (disposed) return;
 
-      let initialData = localData ?? controllerData ?? cloneSample();
-      if (
-        localData &&
-        controllerData &&
-        controllerData.updatedAt > localData.updatedAt
-      ) {
-        initialData = controllerData;
-      }
+      const initialData =
+        controllerData ??
+        (resetRequested ? null : localData) ??
+        cloneSample();
       setData(initialData);
       setHydrated(true);
     };
@@ -1042,7 +1042,18 @@ function AdminScreen({
         </section>
 
         <div className="admin-footer">
-          <p>데이터는 이 PC의 브라우저에 저장됩니다.</p>
+          <div className="storage-notice">
+            <strong>SQLite 자동 저장</strong>
+            <p>
+              데이터는 이 PC의 로컬 저장소에 보관되어 브라우저 데이터를
+              삭제해도 유지됩니다.
+            </p>
+            <small>
+              저장 위치: %LOCALAPPDATA%\CGVGiftDisplay\inventory.db · 데이터
+              초기화: reset-data.bat · 운영 구성까지 제거:
+              clean-uninstall.bat
+            </small>
+          </div>
           <button
             onClick={() => {
               const sample = cloneSample();
