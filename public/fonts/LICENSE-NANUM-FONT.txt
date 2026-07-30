@@ -1,0 +1,48 @@
+NAVER Nanum Font License Notice
+
+Copyright (c) 2010, NAVER Corporation (https://www.navercorp.com/)
+with Reserved Font Name NanumSquareNeo.
+
+This Font Software is licensed under the SIL Open Font License,
+Version 1.1 (26 February 2007).
+
+The font is provided free of charge to all users, including individuals
+and companies. Commercial use is permitted except for selling the font
+software by itself.
+
+The Font Software may be used, studied, copied, merged, embedded, modified,
+redistributed, and bundled with software, subject to the SIL Open Font
+License Version 1.1.
+
+Conditions:
+
+1. Neither the Font Software nor any of its individual components, in
+   Original or Modified Versions, may be sold by itself.
+
+2. Original or Modified Versions may be bundled, redistributed, and/or
+   sold with software, provided that each copy contains the copyright
+   notice and this license information.
+
+3. No Modified Version may use the Reserved Font Name without explicit
+   written permission from the copyright holder.
+
+4. The names of the copyright holder or authors may not be used to
+   promote or advertise a Modified Version except to acknowledge their
+   contributions or with explicit written permission.
+
+5. The Font Software, modified or unmodified, in part or in whole, must
+   be distributed entirely under the SIL Open Font License and must not
+   be distributed under another license. This requirement does not apply
+   to documents created using the Font Software.
+
+DISCLAIMER:
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY ARISING FROM THE USE OR INABILITY TO USE THE FONT
+SOFTWARE.
+
+Official license information:
+https://help.naver.com/service/30016/contents/18088?osType=PC&lang=ko
