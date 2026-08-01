@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -40,6 +40,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     page,
     layout,
     launcher,
+    localLauncher,
     resetLauncher,
     cleanLauncher,
     cleanScript,
@@ -49,6 +50,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../start-local.bat", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/launch-local.ps1", import.meta.url), "utf8"),
     readFile(new URL("../reset-data.bat", import.meta.url), "utf8"),
     readFile(new URL("../clean-uninstall.bat", import.meta.url), "utf8"),
     readFile(new URL("../scripts/clean-uninstall.ps1", import.meta.url), "utf8"),
@@ -61,6 +63,9 @@ test("keeps the Windows launchers and display controls in the package", async ()
   assert.match(page, /모니터링 열기/);
   assert.match(page, /전시 종료/);
   assert.match(launcher, /bootstrap-node\.ps1/i);
+  assert.match(launcher, /goto launch/i);
+  assert.match(localLauncher, /restart-controller\.ps1/i);
+  assert.match(localLauncher, /restart-server\.ps1/i);
   assert.match(resetLauncher, /reset-data\.ps1/i);
   assert.match(cleanLauncher, /clean-uninstall\.ps1/i);
   assert.match(cleanScript, /Assert-ChildPath/);
@@ -69,4 +74,10 @@ test("keeps the Windows launchers and display controls in the package", async ()
   assert.match(bootstrap, /\$nodeVersion = "22\.23\.2"/);
   assert.match(packageJson, /"name": "cgv-guro-gift-display"/);
   assert.match(packageJson, /"version": "1\.1\.1"/);
+
+  await access(new URL("../build/sites-vite-plugin.ts", import.meta.url));
+
+  for (const batchFile of [launcher, resetLauncher, cleanLauncher]) {
+    assert.doesNotMatch(batchFile, /(?<!\r)\n/);
+  }
 });
