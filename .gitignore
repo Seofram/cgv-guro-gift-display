@@ -19,7 +19,6 @@
 /.next/
 /.vinext/
 /out/
-/build/
 
 # misc
 .DS_Store

@@ -159,7 +159,7 @@ const server = createServer(async (request, response) => {
         return;
       }
       respond(response, 200, { ok: true, data: storedData });
-    } catch (error) {
+    } catch {
       respond(response, 500, { ok: false, message: "data read failed" });
     }
     return;

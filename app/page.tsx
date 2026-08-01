@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { stableGroupItemsByMovie } from "./item-order.mjs";
 
 type GiftStatus =
   | "available"
@@ -241,7 +242,6 @@ export default function Home() {
     let disposed = false;
     const displayMode =
       new URLSearchParams(window.location.search).get("view") === "display";
-    setView(displayMode ? "display" : "admin");
     document.body.classList.toggle("display-mode", displayMode);
     document.title = displayMode
       ? "CGV 구로 경품 전시 화면"
@@ -284,6 +284,7 @@ export default function Home() {
         controllerData ??
         (resetRequested ? null : localData) ??
         cloneSample();
+      setView(displayMode ? "display" : "admin");
       setData(initialData);
       setHydrated(true);
     };
@@ -524,25 +525,11 @@ function AdminScreen({
   };
 
   const groupSameMovies = () => {
-    setData((current) => {
-      const groups = new Map<string, GiftItem[]>();
-
-      for (const item of current.items) {
-        const key = normalizeMovieName(item.movie);
-        const group = groups.get(key);
-        if (group) {
-          group.push(item);
-        } else {
-          groups.set(key, [item]);
-        }
-      }
-
-      return {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        items: [...groups.values()].flat(),
-      };
-    });
+    setData((current) => ({
+      ...current,
+      updatedAt: new Date().toISOString(),
+      items: stableGroupItemsByMovie(current.items),
+    }));
     pulseSaved();
     showDisplayMessage("같은 영화 항목끼리 모았습니다.");
   };
@@ -643,6 +630,7 @@ function AdminScreen({
       <header className="admin-topbar">
         <div className="brand-lockup">
           <div className="mini-logo">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/assets/cgv-logo.png"
               alt="CGV"
@@ -1287,10 +1275,6 @@ function DisplayScreen({ data }: { data: AppData }) {
   }, [data, now]);
 
   useEffect(() => {
-    setPageIndex(0);
-  }, [pages.length]);
-
-  useEffect(() => {
     if (pages.length <= 1) return;
     const interval = window.setInterval(
       () => setPageIndex((current) => (current + 1) % pages.length),
@@ -1299,7 +1283,8 @@ function DisplayScreen({ data }: { data: AppData }) {
     return () => window.clearInterval(interval);
   }, [pages.length, data.settings.pageSeconds]);
 
-  const currentPage = pages[Math.min(pageIndex, pages.length - 1)] ?? [];
+  const safePageIndex = Math.min(pageIndex, pages.length - 1);
+  const currentPage = pages[safePageIndex] ?? [];
   const currentRowCount = currentPage.reduce(
     (total, group) => total + group.items.length,
     0,
@@ -1328,6 +1313,7 @@ function DisplayScreen({ data }: { data: AppData }) {
       >
         <header className="display-header">
           <div className="display-logo">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/assets/cgv-logo.png"
               alt="CGV"
@@ -1415,7 +1401,10 @@ function DisplayScreen({ data }: { data: AppData }) {
         {pages.length > 1 && (
           <div className="page-indicator">
             {pages.map((_, index) => (
-              <i key={index} className={index === pageIndex ? "active" : ""} />
+              <i
+                key={index}
+                className={index === safePageIndex ? "active" : ""}
+              />
             ))}
           </div>
         )}
