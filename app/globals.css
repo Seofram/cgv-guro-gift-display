@@ -63,6 +63,17 @@ body {
     "Noto Sans KR", Arial, sans-serif;
 }
 
+body,
+.admin-app,
+.admin-table,
+.admin-table th,
+.admin-table td,
+.panel-heading,
+.display-viewport,
+.display-canvas {
+  cursor: default;
+}
+
 button,
 input,
 select,
@@ -70,7 +81,14 @@ textarea {
   font: inherit;
 }
 
-button {
+input,
+textarea,
+[contenteditable="true"] {
+  cursor: text;
+}
+
+button,
+select {
   cursor: pointer;
 }
 
@@ -495,13 +513,36 @@ button {
   background: var(--red);
 }
 
+.inventory-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-movies-button {
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid #dedbd6;
+  border-radius: 10px;
+  background: #fff;
+  color: #555;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.group-movies-button:hover {
+  border-color: #c9c4bd;
+  background: #f8f7f5;
+  color: #222;
+}
+
 .data-table-wrap {
   overflow-x: auto;
 }
 
 .admin-table {
   width: 100%;
-  min-width: 1040px;
+  min-width: 1320px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -517,35 +558,40 @@ button {
 }
 
 .admin-table th:nth-child(1) {
-  width: 72px;
+  width: 58px;
   text-align: center;
 }
 
 .admin-table th:nth-child(2) {
-  width: 150px;
+  width: 72px;
+  text-align: center;
 }
 
 .admin-table th:nth-child(3) {
-  width: 95px;
+  width: 150px;
 }
 
 .admin-table th:nth-child(4) {
-  width: 180px;
+  width: 100px;
 }
 
 .admin-table th:nth-child(5) {
-  width: 118px;
+  width: 180px;
 }
 
 .admin-table th:nth-child(6) {
-  width: 220px;
+  width: 118px;
 }
 
 .admin-table th:nth-child(7) {
-  width: 165px;
+  width: 280px;
 }
 
 .admin-table th:nth-child(8) {
+  width: 190px;
+}
+
+.admin-table th:nth-child(9) {
   width: 44px;
 }
 
@@ -564,9 +610,40 @@ button {
   text-align: center;
 }
 
-.admin-table td:first-child .visibility-toggle {
+.admin-table td:nth-child(2) .visibility-toggle {
   display: block;
   margin: 0 auto;
+}
+
+.order-controls {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 24px);
+  gap: 3px;
+}
+
+.order-controls button {
+  display: grid;
+  width: 24px;
+  height: 27px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #dedbd6;
+  border-radius: 6px;
+  background: #fff;
+  color: #666;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.order-controls button:hover:not(:disabled) {
+  border-color: #aaa49c;
+  background: #f6f4f1;
+  color: #222;
+}
+
+.order-controls button:disabled {
+  cursor: default;
+  opacity: 0.28;
 }
 
 .muted-row td {
@@ -720,12 +797,14 @@ button {
 
 .date-range {
   display: grid;
-  grid-template-columns: 1fr 14px 1fr;
+  min-width: 0;
+  grid-template-columns: minmax(112px, 1fr) auto minmax(112px, 1fr);
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .date-range input {
+  min-width: 0;
   padding: 0 5px;
   color: #5e5e5e;
   font-size: 12px;
@@ -738,13 +817,16 @@ button {
 }
 
 .day-mode-control {
-  display: flex;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(92px, 1fr);
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   white-space: nowrap;
 }
 
 .day-mode-button {
+  min-width: 0;
   height: 34px;
   padding: 0 11px;
   border: 1px solid #dedbd6;
@@ -1569,9 +1651,30 @@ body.display-mode {
   .display-action-message {
     display: none;
   }
+
+  .panel-heading {
+    gap: 18px;
+  }
+
+  .inventory-heading-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }
 
 @media (max-width: 620px) {
+  .data-panel .panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-top: 18px;
+    padding-bottom: 18px;
+  }
+
+  .inventory-heading-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
   .admin-footer {
     align-items: flex-start;
     flex-direction: column;
