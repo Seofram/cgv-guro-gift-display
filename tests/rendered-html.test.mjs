@@ -73,7 +73,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
   assert.match(cleanScript, /node_modules/);
   assert.match(bootstrap, /\$nodeVersion = "22\.23\.2"/);
   assert.match(packageJson, /"name": "cgv-guro-gift-display"/);
-  assert.match(packageJson, /"version": "1\.2\.1"/);
+  assert.match(packageJson, /"version": "1\.2\.2"/);
 
   await access(new URL("../build/sites-vite-plugin.ts", import.meta.url));
 
