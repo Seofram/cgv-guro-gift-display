@@ -1,6 +1,10 @@
 name: Windows desktop
 
 on:
+  push:
+    branches:
+      - main
+      - "agent/**"
   pull_request:
     paths:
       - ".github/workflows/windows-desktop.yml"
