@@ -184,8 +184,42 @@ function Get-ListeningPorts {
   )
 }
 
-$backupPath = Join-Path (Split-Path $databasePath -Parent) "inventory.pre-desktop-verification-$timestamp.bak"
-Copy-Item -LiteralPath $databasePath -Destination $backupPath
+function Assert-FileNotInUse {
+  param([string]$Path)
+
+  try {
+    $stream = [IO.File]::Open(
+      $Path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::ReadWrite,
+      [IO.FileShare]::None
+    )
+    $stream.Dispose()
+  } catch {
+    throw "Close every legacy and desktop CGV application before verification. Database file is in use: $Path"
+  }
+}
+
+$databaseDirectory = Split-Path $databasePath -Parent
+$databaseFiles = @(
+  $databasePath,
+  "$databasePath-wal",
+  "$databasePath-shm"
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+
+foreach ($databaseFile in $databaseFiles) {
+  Assert-FileNotInUse -Path $databaseFile
+}
+
+$backupDirectory = Join-Path $databaseDirectory "inventory.pre-desktop-verification-$timestamp"
+New-Item -ItemType Directory -Path $backupDirectory | Out-Null
+$backupFiles = @(
+  foreach ($databaseFile in $databaseFiles) {
+    $destination = Join-Path $backupDirectory (Split-Path $databaseFile -Leaf)
+    Copy-Item -LiteralPath $databaseFile -Destination $destination
+    $destination
+  }
+)
 
 $screens = @(
   [Windows.Forms.Screen]::AllScreens |
@@ -282,7 +316,8 @@ try {
     BundledNodeNpmBrowserRuntime = $false
     LocalListeningServer = $false
     DatabasePath = $databasePath
-    DatabaseBackupPath = $backupPath
+    DatabaseBackupDirectory = $backupDirectory
+    DatabaseBackupFiles = $backupFiles
     ExistingDataConfirmedByOperator = $true
     MonitorCount = $screens.Count
     Monitors = $screens
@@ -294,14 +329,15 @@ try {
   }
   $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReportPath -Encoding utf8
   Write-Host "검증 통과: $ReportPath"
-  Write-Host "DB 백업: $backupPath"
+  Write-Host "DB 백업: $backupDirectory"
 } catch {
   $failure = [ordered]@{
     Status = "failed"
     VerifiedAt = (Get-Date).ToString("o")
     ApplicationPath = $resolvedApplication
     DatabasePath = $databasePath
-    DatabaseBackupPath = $backupPath
+    DatabaseBackupDirectory = $backupDirectory
+    DatabaseBackupFiles = $backupFiles
     Error = $_.Exception.Message
   }
   $failure | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ReportPath -Encoding utf8

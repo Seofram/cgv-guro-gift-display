@@ -213,10 +213,28 @@ jobs:
             $env:LOCALAPPDATA = $originalLocalAppData
           }
 
-      - name: Upload Windows installer
+      - name: Prepare operating PC verification kit
+        id: verification-kit
+        shell: pwsh
+        run: |
+          $kitDirectory = Join-Path $env:RUNNER_TEMP "cgv-guro-gift-display-verification-kit"
+          New-Item -ItemType Directory -Path $kitDirectory -Force | Out-Null
+
+          $installer = "${{ steps.installer.outputs.path }}"
+          Copy-Item -LiteralPath $installer -Destination $kitDirectory
+          Copy-Item -LiteralPath "scripts/verify-desktop-install.ps1" -Destination $kitDirectory
+          Copy-Item -LiteralPath "README_사용법.md" -Destination $kitDirectory
+
+          $installerHash = Get-FileHash -LiteralPath $installer -Algorithm SHA256
+          "$($installerHash.Hash)  $($installerHash.Path | Split-Path -Leaf)" |
+            Set-Content -LiteralPath (Join-Path $kitDirectory "SHA256SUMS.txt") -Encoding ascii
+
+          "path=$kitDirectory" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows installer and verification kit
         uses: actions/upload-artifact@v4
         with:
           name: cgv-guro-gift-display-windows-${{ github.sha }}
-          path: ${{ steps.installer.outputs.path }}
+          path: ${{ steps.verification-kit.outputs.path }}
           if-no-files-found: error
           retention-days: 14

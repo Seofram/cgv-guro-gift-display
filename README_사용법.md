@@ -38,14 +38,14 @@ CMD 창, Node.js, npm, Edge 키오스크 또는 로컬 서버는 운영 시 필�
 1. Windows 디스플레이 설정에서 화면이 확장으로 설정되어 있습니다.
 2. 기존 inventory.db가 위 경로에 있습니다.
 3. 실행 중인 CGV 경품 안내 앱을 모두 종료합니다.
-4. 저장소 폴더에서 다음 명령을 실행합니다.
+4. GitHub Actions 아티팩트의 압축을 푼 폴더에서 다음 명령을 실행합니다.
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-desktop-install.ps1 -ApplicationPath "설치된 cgv-guro-gift-display.exe의 전체 경로"
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\verify-desktop-install.ps1 -ApplicationPath "설치된 cgv-guro-gift-display.exe의 전체 경로"
 
 도구가 관리 창에 기존 데이터가 보이는지 물으면 화면을 확인한 뒤 Y를 입력합니다.
 자동 검사까지 통과하면 다음 파일이 생성됩니다.
 
-- inventory.pre-desktop-verification-*.bak: 실행 전 DB 백업
+- inventory.pre-desktop-verification-* 폴더: 실행 전 DB와 WAL 보조 파일 백업
 - desktop-verification-*.json: 설치 크기, 실행 속도, 모니터 및 창 위치 결과
 
 보고서의 Status가 passed, ExistingDataConfirmedByOperator가 true,

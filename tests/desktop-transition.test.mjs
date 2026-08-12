@@ -78,8 +78,16 @@ test("builds and size-checks the NSIS installer on a Windows runner", async () =
   assert.match(workflow, /\$warm\.StartupMs -gt 2000/);
   assert.match(workflow, /General hydrated restart:/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
+  assert.match(workflow, /Prepare operating PC verification kit/);
+  assert.match(workflow, /verify-desktop-install\.ps1/);
+  assert.match(workflow, /README_사용법\.md/);
+  assert.match(workflow, /SHA256SUMS\.txt/);
   assert.match(verificationScript, /--verify-display/);
   assert.match(verificationScript, /inventory\.pre-desktop-verification/);
+  assert.match(verificationScript, /\$databasePath-wal/);
+  assert.match(verificationScript, /\$databasePath-shm/);
+  assert.match(verificationScript, /FileShare\]::None/);
+  assert.match(verificationScript, /DatabaseBackupFiles/);
   assert.match(verificationScript, /Windows\.Forms\.Screen.*AllScreens/s);
   assert.match(verificationScript, /DisplayFullscreen/);
   assert.match(verificationScript, /ExistingDataConfirmedByOperator/);

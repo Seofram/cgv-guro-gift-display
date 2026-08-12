@@ -49,20 +49,23 @@ Windows 듀얼 모니터 환경을 위한 경품 관리·전시 데스크톱 앱
 
 ## 운영 PC 최종 검증
 
-실제 기존 DB와 물리적 듀얼 모니터 검증은 저장소의
-scripts\verify-desktop-install.ps1로 수행합니다. 실행 중인 앱을 먼저 종료한 뒤
-설치된 실행 파일 경로를 지정합니다.
+GitHub Actions의 Windows 아티팩트를 압축 해제하면 설치 파일과 함께
+verify-desktop-install.ps1, README_사용법.md, SHA256SUMS.txt가 들어 있습니다.
+실제 기존 DB와 물리적 듀얼 모니터 검증은 이 검증 스크립트로 수행합니다.
+실행 중인 기존 웹 버전과 데스크톱 앱을 모두 종료한 뒤 설치된 실행 파일 경로를
+지정합니다.
 설치 위치가 예시와 다르면 파일 탐색기에서 cgv-guro-gift-display.exe를 찾아
 그 전체 경로로 바꿉니다.
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-desktop-install.ps1 -ApplicationPath "C:\Program Files\CGV 구로 경품 안내\cgv-guro-gift-display.exe"
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\verify-desktop-install.ps1 -ApplicationPath "C:\Program Files\CGV 구로 경품 안내\cgv-guro-gift-display.exe"
 
 검증 도구는 실행 전 기존 DB 백업, 물리 모니터 2대, 네이티브 관리·전시 창,
 비기본 모니터 전체화면, 기존 데이터 운영자 확인, 50 MiB 이하 설치 크기,
 Node/npm/브라우저 런타임과 로컬 서버 부재, 일반 재실행 2초 이하를 확인합니다.
 
-통과하면 DB 폴더에 desktop-verification-*.json 보고서와 검증 전 DB 백업을
-남깁니다.
+통과하면 DB 폴더에 desktop-verification-*.json 보고서와 검증 전 DB 백업 폴더를
+남깁니다. 백업 폴더에는 SQLite WAL 데이터가 있을 경우 inventory.db-wal과
+inventory.db-shm도 함께 보존됩니다.
 
 ## 개발
 
