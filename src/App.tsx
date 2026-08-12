@@ -248,9 +248,6 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setView(displayMode ? "display" : "admin");
     document.body.classList.toggle("display-mode", displayMode);
-    document.title = displayMode
-      ? "CGV 구로 경품 전시 화면"
-      : "CGV 구로 경품 관리";
 
     let localData: AppData | null = null;
     const stored = window.localStorage.getItem(STORAGE_KEY);
@@ -329,6 +326,15 @@ export default function Home() {
       }
     }
   }, [data, hydrated, view]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    document.title =
+      view === "display"
+        ? "CGV 구로 경품 전시 화면"
+        : "CGV 구로 경품 관리";
+    document.documentElement.dataset.appReady = "true";
+  }, [hydrated, view]);
 
   useEffect(() => {
     if (!hydrated || view !== "display") return;

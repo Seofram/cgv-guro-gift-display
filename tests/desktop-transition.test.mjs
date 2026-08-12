@@ -53,8 +53,14 @@ test("builds and size-checks the NSIS installer on a Windows runner", async () =
   assert.match(workflow, /cargo test --locked/);
   assert.match(workflow, /tauri -- build --bundles nsis/);
   assert.match(workflow, /\$limit = 50MB/);
-  assert.match(workflow, /Measure-FirstWindow/);
+  assert.match(workflow, /NSIS installation failed/);
+  assert.match(workflow, /forbiddenRuntime/);
+  assert.match(workflow, /Installed footprint/);
+  assert.match(workflow, /Measure-ReadyScreen/);
+  assert.match(workflow, /MainWindowTitle -eq \$readyTitle/);
+  assert.match(workflow, /Get-NetTCPConnection -State Listen/);
+  assert.match(workflow, /CGVGiftDisplay\\inventory\.db/);
   assert.match(workflow, /\$warm\.StartupMs -gt 2000/);
-  assert.match(workflow, /General restart:/);
+  assert.match(workflow, /General hydrated restart:/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });

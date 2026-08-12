@@ -78,12 +78,59 @@ jobs:
             throw "Installer is $sizeMiB MiB and exceeds the 50 MiB target."
           }
 
-      - name: Verify warm startup is under two seconds
+      - name: Install package and verify standalone runtime
+        id: installed
         shell: pwsh
         run: |
-          $application = Resolve-Path "src-tauri/target/release/cgv-guro-gift-display.exe"
+          $installer = "${{ steps.installer.outputs.path }}"
+          $installDirectory = Join-Path $env:RUNNER_TEMP "cgv-guro-gift-display-installed"
+          $install = Start-Process -FilePath $installer -ArgumentList @(
+            "/S",
+            "/D=$installDirectory"
+          ) -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "NSIS installation failed with exit code $($install.ExitCode)."
+          }
 
-          function Measure-FirstWindow([string] $path, [int] $timeoutMs = 15000) {
+          $application = Get-ChildItem $installDirectory -Recurse -File |
+            Where-Object Name -eq "cgv-guro-gift-display.exe" |
+            Select-Object -First 1
+          if (-not $application) {
+            throw "The installed desktop executable was not found."
+          }
+
+          $forbiddenRuntime = Get-ChildItem $installDirectory -Recurse -File |
+            Where-Object Name -Match "^(node|npm|npx|chrome|msedge)(\.exe|\.cmd)?$"
+          if ($forbiddenRuntime) {
+            throw "Standalone package contains a forbidden runtime: $($forbiddenRuntime.FullName)"
+          }
+
+          $installedBytes = (
+            Get-ChildItem $installDirectory -Recurse -File |
+              Measure-Object Length -Sum
+          ).Sum
+          $installedMiB = [math]::Round($installedBytes / 1MB, 2)
+          if ($installedBytes -gt 50MB) {
+            throw "Installed footprint is $installedMiB MiB and exceeds the 50 MiB target."
+          }
+
+          "application=$($application.FullName)" >> $env:GITHUB_OUTPUT
+          "directory=$installDirectory" >> $env:GITHUB_OUTPUT
+          "### Installed desktop runtime" >> $env:GITHUB_STEP_SUMMARY
+          "- Installed footprint: **$installedMiB MiB** / 50 MiB" >> $env:GITHUB_STEP_SUMMARY
+          "- Bundled Node/npm/browser runtime: **none**" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify hydrated warm startup is under two seconds
+        shell: pwsh
+        run: |
+          $application = "${{ steps.installed.outputs.application }}"
+          $runtimeLocalAppData = Join-Path $env:RUNNER_TEMP "cgv-runtime-local-app-data"
+          New-Item -ItemType Directory -Path $runtimeLocalAppData -Force | Out-Null
+          $originalLocalAppData = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $runtimeLocalAppData
+          $readyTitle = "CGV 구로 경품 관리"
+
+          function Measure-ReadyScreen([string] $path, [int] $timeoutMs = 15000) {
             $timer = [Diagnostics.Stopwatch]::StartNew()
             $process = Start-Process -FilePath $path -PassThru
 
@@ -93,7 +140,7 @@ jobs:
               if ($process.HasExited) {
                 throw "Desktop application exited before creating its main window."
               }
-              if ($process.MainWindowHandle -ne 0) {
+              if ($process.MainWindowHandle -ne 0 -and $process.MainWindowTitle -eq $readyTitle) {
                 $timer.Stop()
                 return @{
                   Process = $process
@@ -103,7 +150,7 @@ jobs:
             }
 
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "Desktop application did not create a main window within $timeoutMs ms."
+            throw "Desktop application did not finish loading its management screen within $timeoutMs ms."
           }
 
           function Stop-DesktopApplication($measurement) {
@@ -114,19 +161,37 @@ jobs:
             }
           }
 
-          $cold = Measure-FirstWindow $application
-          Stop-DesktopApplication $cold
-          Start-Sleep -Milliseconds 250
+          try {
+            $cold = Measure-ReadyScreen $application
+            $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+              Where-Object OwningProcess -eq $cold.Process.Id
+            if ($listeners) {
+              throw "Desktop application opened a local listening port."
+            }
+            Stop-DesktopApplication $cold
+            Start-Sleep -Milliseconds 250
 
-          $warm = Measure-FirstWindow $application
-          Stop-DesktopApplication $warm
+            $database = Join-Path $runtimeLocalAppData "CGVGiftDisplay\inventory.db"
+            if (-not (Test-Path $database)) {
+              throw "The legacy-compatible inventory database was not created at $database."
+            }
 
-          "### Windows startup measurement" >> $env:GITHUB_STEP_SUMMARY
-          "- First launch: **$($cold.StartupMs) ms**" >> $env:GITHUB_STEP_SUMMARY
-          "- General restart: **$($warm.StartupMs) ms** / 2000 ms" >> $env:GITHUB_STEP_SUMMARY
+            $warm = Measure-ReadyScreen $application
+            Stop-DesktopApplication $warm
 
-          if ($warm.StartupMs -gt 2000) {
-            throw "General restart took $($warm.StartupMs) ms and exceeds the 2000 ms target."
+            "First hydrated screen: $($cold.StartupMs) ms"
+            "General hydrated restart: $($warm.StartupMs) ms"
+            "### Windows startup measurement" >> $env:GITHUB_STEP_SUMMARY
+            "- First hydrated screen: **$($cold.StartupMs) ms**" >> $env:GITHUB_STEP_SUMMARY
+            "- General hydrated restart: **$($warm.StartupMs) ms** / 2000 ms" >> $env:GITHUB_STEP_SUMMARY
+            "- Local listening server: **none**" >> $env:GITHUB_STEP_SUMMARY
+            "- SQLite path: ``%LOCALAPPDATA%\CGVGiftDisplay\inventory.db``" >> $env:GITHUB_STEP_SUMMARY
+
+            if ($warm.StartupMs -gt 2000) {
+              throw "General hydrated restart took $($warm.StartupMs) ms and exceeds the 2000 ms target."
+            }
+          } finally {
+            $env:LOCALAPPDATA = $originalLocalAppData
           }
 
       - name: Upload Windows installer
