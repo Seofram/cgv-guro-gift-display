@@ -1078,7 +1078,6 @@ body.display-mode {
   grid-template-rows: 126px 160px 1fr 158px;
   overflow: hidden;
   transform-origin: center;
-  translate: -50% -50%;
   background:
     radial-gradient(circle at 50% 38%, rgba(255, 255, 255, 0.9), transparent 52%),
     #f4f1eb;

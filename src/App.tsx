@@ -4,6 +4,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { stableGroupItemsByMovie } from "./item-order.mjs";
 import {
   closeDesktopDisplay,
+  getDesktopView,
   getDesktopDisplayStatus,
   isDesktopRuntime,
   loadDesktopData,
@@ -251,6 +252,7 @@ export default function Home() {
   useEffect(() => {
     let disposed = false;
     const displayMode =
+      getDesktopView() === "display" ||
       new URLSearchParams(window.location.search).get("view") === "display";
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setView(displayMode ? "display" : "admin");
@@ -1379,7 +1381,7 @@ function DisplayScreen({ data }: { data: AppData }) {
       <div
         className="display-canvas"
         style={{
-          transform: `scale(${scale})`,
+          transform: `translate(-50%, -50%) scale(${scale})`,
           width: 1280,
           height: 1024,
         }}

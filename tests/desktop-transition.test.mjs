@@ -18,7 +18,7 @@ test("configures the lightweight Tauri desktop shell", async () => {
   const packageJson = JSON.parse(packageSource);
   const capability = JSON.parse(capabilitySource);
 
-  assert.equal(config.version, "1.3.0");
+  assert.equal(config.version, "1.3.1");
   assert.equal(packageJson.version, config.version);
   assert.equal(config.build.frontendDist, "../desktop-dist");
   assert.deepEqual(config.bundle.targets, ["nsis"]);
@@ -30,10 +30,10 @@ test("configures the lightweight Tauri desktop shell", async () => {
 });
 
 test("keeps the legacy SQLite location and adds native display commands", async () => {
-  const source = await readFile(
-    new URL("../src-tauri/src/lib.rs", import.meta.url),
-    "utf8",
-  );
+  const [source, runtimeSource] = await Promise.all([
+    readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src/desktop-runtime.ts", import.meta.url), "utf8"),
+  ]);
 
   assert.match(source, /var_os\("LOCALAPPDATA"\)/);
   assert.match(source, /CGVGiftDisplay/);
@@ -46,6 +46,11 @@ test("keeps the legacy SQLite location and adds native display commands", async 
   assert.match(source, /selects_a_non_primary_monitor_for_the_display_window/);
   assert.match(source, /should_open_display_on_startup/);
   assert.match(source, /--verify-display/);
+  assert.match(source, /WebviewUrl::App\("index\.html"\.into\(\)\)/);
+  assert.doesNotMatch(source, /index\.html\?view=display/);
+  assert.match(runtimeSource, /getCurrentWebviewWindow/);
+  assert.match(runtimeSource, /label === "display"/);
+  assert.match(runtimeSource, /label === "monitor-preview"/);
 });
 
 test("builds and size-checks the NSIS installer on a Windows runner", async () => {
