@@ -47,7 +47,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     bootstrap,
     packageJson,
   ] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../start-local.bat", import.meta.url), "utf8"),
     readFile(new URL("../scripts/launch-local.ps1", import.meta.url), "utf8"),
@@ -73,7 +73,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
   assert.match(cleanScript, /node_modules/);
   assert.match(bootstrap, /\$nodeVersion = "22\.23\.2"/);
   assert.match(packageJson, /"name": "cgv-guro-gift-display"/);
-  assert.match(packageJson, /"version": "1\.2\.2"/);
+  assert.match(packageJson, /"version": "1\.3\.0"/);
 
   await access(new URL("../build/sites-vite-plugin.ts", import.meta.url));
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stableGroupItemsByMovie } from "../app/item-order.mjs";
+import { stableGroupItemsByMovie } from "../src/item-order.mjs";
 
 test("groups movies by first appearance without changing order inside groups", () => {
   const items = [
