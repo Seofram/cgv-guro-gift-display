@@ -103,6 +103,22 @@ fn mark_frontend_ready(window: WebviewWindow, view: String) -> Result<(), String
     window.set_title(title).map_err(|error| error.to_string())
 }
 
+fn choose_display_monitor_index(
+    monitor_positions: &[(i32, i32)],
+    primary_position: Option<(i32, i32)>,
+) -> Option<usize> {
+    monitor_positions
+        .iter()
+        .position(|position| Some(*position) != primary_position)
+        .or_else(|| {
+            if monitor_positions.is_empty() {
+                None
+            } else {
+                Some(0)
+            }
+        })
+}
+
 #[tauri::command]
 fn open_display_window(app: AppHandle, preview: bool) -> Result<(), String> {
     let label = if preview {
@@ -139,12 +155,20 @@ fn open_display_window(app: AppHandle, preview: bool) -> Result<(), String> {
         let primary_position = app
             .primary_monitor()
             .map_err(|error| error.to_string())?
-            .map(|monitor| *monitor.position());
-        let monitor = monitors
+            .map(|monitor| {
+                let position = monitor.position();
+                (position.x, position.y)
+            });
+        let monitor_positions = monitors
             .iter()
-            .find(|monitor| Some(*monitor.position()) != primary_position)
-            .or_else(|| monitors.first())
+            .map(|monitor| {
+                let position = monitor.position();
+                (position.x, position.y)
+            })
+            .collect::<Vec<_>>();
+        let monitor_index = choose_display_monitor_index(&monitor_positions, primary_position)
             .ok_or_else(|| "사용 가능한 모니터를 찾을 수 없습니다.".to_string())?;
+        let monitor = &monitors[monitor_index];
         let position = monitor.position();
         let size = monitor.size();
         builder = builder
@@ -233,6 +257,24 @@ mod tests {
             read_app_data(&connection).expect("read updated payload"),
             Some(updated)
         );
+    }
+
+    #[test]
+    fn selects_a_non_primary_monitor_for_the_display_window() {
+        let monitors = [(0, 0), (1920, 0), (-1280, 0)];
+        assert_eq!(
+            choose_display_monitor_index(&monitors, Some((0, 0))),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_only_monitor_and_handles_no_monitors() {
+        assert_eq!(
+            choose_display_monitor_index(&[(0, 0)], Some((0, 0))),
+            Some(0)
+        );
+        assert_eq!(choose_display_monitor_index(&[], Some((0, 0))), None);
     }
 }
 

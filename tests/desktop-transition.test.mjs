@@ -41,6 +41,7 @@ test("keeps the legacy SQLite location and adds native display commands", async 
   assert.match(source, /inventory-updated/);
   assert.match(source, /reads_and_updates_legacy_app_state_row/);
   assert.match(source, /mark_frontend_ready/);
+  assert.match(source, /selects_a_non_primary_monitor_for_the_display_window/);
 });
 
 test("builds and size-checks the NSIS installer on a Windows runner", async () => {
