@@ -46,7 +46,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     bootstrap,
     packageJson,
   ] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../start-local.bat", import.meta.url), "utf8"),
     readFile(new URL("../reset-data.bat", import.meta.url), "utf8"),
