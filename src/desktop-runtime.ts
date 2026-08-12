@@ -23,6 +23,10 @@ export async function saveDesktopData<T>(data: T) {
   await invoke("save_app_data", { data });
 }
 
+export async function markDesktopReady(view: "admin" | "display") {
+  await invoke("mark_frontend_ready", { view });
+}
+
 export async function subscribeToDesktopData<T>(
   onData: (data: T) => void,
 ): Promise<UnlistenFn> {

@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const DATABASE_DIRECTORY: &str = "CGVGiftDisplay";
 const DATABASE_FILE: &str = "inventory.db";
@@ -91,6 +91,16 @@ fn save_app_data(app: AppHandle, data: Value) -> Result<(), String> {
     app.emit("inventory-updated", data)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn mark_frontend_ready(window: WebviewWindow, view: String) -> Result<(), String> {
+    let title = if view == "display" {
+        "CGV 구로 경품 전시 화면"
+    } else {
+        "CGV 구로 경품 관리"
+    };
+    window.set_title(title).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -243,6 +253,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_app_data,
             save_app_data,
+            mark_frontend_ready,
             open_display_window,
             close_display_window,
             display_status

@@ -7,6 +7,7 @@ import {
   getDesktopDisplayStatus,
   isDesktopRuntime,
   loadDesktopData,
+  markDesktopReady,
   openDesktopDisplay,
   saveDesktopData,
   subscribeToDesktopData,
@@ -329,11 +330,15 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
-    document.title =
+    const readyTitle =
       view === "display"
         ? "CGV 구로 경품 전시 화면"
         : "CGV 구로 경품 관리";
+    document.title = readyTitle;
     document.documentElement.dataset.appReady = "true";
+    if (isDesktopRuntime()) {
+      void markDesktopReady(view).catch(() => undefined);
+    }
   }, [hydrated, view]);
 
   useEffect(() => {
