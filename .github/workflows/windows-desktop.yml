@@ -227,7 +227,7 @@ jobs:
 
           $installerHash = Get-FileHash -LiteralPath $installer -Algorithm SHA256
           "$($installerHash.Hash)  $($installerHash.Path | Split-Path -Leaf)" |
-            Set-Content -LiteralPath (Join-Path $kitDirectory "SHA256SUMS.txt") -Encoding ascii
+            Set-Content -LiteralPath (Join-Path $kitDirectory "SHA256SUMS.txt") -Encoding utf8
 
           "path=$kitDirectory" >> $env:GITHUB_OUTPUT
 
