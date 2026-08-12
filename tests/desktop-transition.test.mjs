@@ -39,6 +39,7 @@ test("keeps the legacy SQLite location and adds native display commands", async 
   assert.match(source, /CREATE TABLE IF NOT EXISTS app_state/);
   assert.match(source, /open_display_window/);
   assert.match(source, /inventory-updated/);
+  assert.match(source, /reads_and_updates_legacy_app_state_row/);
 });
 
 test("builds and size-checks the NSIS installer on a Windows runner", async () => {
@@ -49,7 +50,7 @@ test("builds and size-checks the NSIS installer on a Windows runner", async () =
 
   assert.match(workflow, /runs-on: windows-latest/);
   assert.match(workflow, /push:\s*\n\s*branches:/);
-  assert.match(workflow, /cargo check --locked/);
+  assert.match(workflow, /cargo test --locked/);
   assert.match(workflow, /tauri -- build --bundles nsis/);
   assert.match(workflow, /\$limit = 50MB/);
   assert.match(workflow, /Measure-FirstWindow/);

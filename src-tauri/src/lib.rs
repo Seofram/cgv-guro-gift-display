@@ -20,12 +20,7 @@ fn data_directory(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn open_database(app: &AppHandle) -> Result<Connection, String> {
-    let directory = data_directory(app)?;
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-
-    let connection =
-        Connection::open(directory.join(DATABASE_FILE)).map_err(|error| error.to_string())?;
+fn initialize_database(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -36,13 +31,10 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
          updated_at TEXT NOT NULL
        );",
         )
-        .map_err(|error| error.to_string())?;
-    Ok(connection)
+        .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn load_app_data(app: AppHandle) -> Result<Option<Value>, String> {
-    let connection = open_database(&app)?;
+fn read_app_data(connection: &Connection) -> Result<Option<Value>, String> {
     let payload = connection
         .query_row("SELECT payload FROM app_state WHERE id = 1", [], |row| {
             row.get::<_, String>(0)
@@ -55,15 +47,8 @@ fn load_app_data(app: AppHandle) -> Result<Option<Value>, String> {
         .transpose()
 }
 
-#[tauri::command]
-fn save_app_data(app: AppHandle, data: Value) -> Result<(), String> {
-    let updated_at = data
-        .get("updatedAt")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "updatedAt is required".to_string())?;
+fn write_app_data(connection: &Connection, data: &Value) -> Result<(), String> {
     let payload = serde_json::to_string(&data).map_err(|error| error.to_string())?;
-    let connection = open_database(&app)?;
-
     connection
         .execute(
             "INSERT INTO app_state (id, payload, updated_at)
@@ -71,9 +56,37 @@ fn save_app_data(app: AppHandle, data: Value) -> Result<(), String> {
        ON CONFLICT(id) DO UPDATE SET
          payload = excluded.payload,
          updated_at = excluded.updated_at",
-            params![payload, updated_at],
+            params![
+                payload,
+                data.get("updatedAt")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "updatedAt is required".to_string())?
+            ],
         )
-        .map_err(|error| error.to_string())?;
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn open_database(app: &AppHandle) -> Result<Connection, String> {
+    let directory = data_directory(app)?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+
+    let connection =
+        Connection::open(directory.join(DATABASE_FILE)).map_err(|error| error.to_string())?;
+    initialize_database(&connection)?;
+    Ok(connection)
+}
+
+#[tauri::command]
+fn load_app_data(app: AppHandle) -> Result<Option<Value>, String> {
+    let connection = open_database(&app)?;
+    read_app_data(&connection)
+}
+
+#[tauri::command]
+fn save_app_data(app: AppHandle, data: Value) -> Result<(), String> {
+    let connection = open_database(&app)?;
+    write_app_data(&connection, &data)?;
 
     app.emit("inventory-updated", data)
         .map_err(|error| error.to_string())?;
@@ -166,6 +179,50 @@ fn display_status(app: AppHandle) -> DisplayStatus {
         incident_id: None,
         incident_at: None,
         last_sync_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_and_updates_legacy_app_state_row() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite database");
+        initialize_database(&connection).expect("initialize legacy-compatible schema");
+
+        let legacy = serde_json::json!({
+            "items": [{"id": "legacy-gift", "movie": "기존 영화"}],
+            "settings": {"location": "구로"},
+            "updatedAt": "2026-08-01T00:00:00.000Z"
+        });
+        connection
+            .execute(
+                "INSERT INTO app_state (id, payload, updated_at) VALUES (1, ?1, ?2)",
+                params![legacy.to_string(), "2026-08-01T00:00:00.000Z"],
+            )
+            .expect("insert legacy app_state row");
+
+        assert_eq!(
+            read_app_data(&connection).expect("read legacy payload"),
+            Some(legacy)
+        );
+
+        let updated = serde_json::json!({
+            "items": [{"id": "legacy-gift", "movie": "변경된 영화"}],
+            "settings": {"location": "구로"},
+            "updatedAt": "2026-08-12T00:00:00.000Z"
+        });
+        write_app_data(&connection, &updated).expect("update existing app_state row");
+
+        let row_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM app_state", [], |row| row.get(0))
+            .expect("count app_state rows");
+        assert_eq!(row_count, 1);
+        assert_eq!(
+            read_app_data(&connection).expect("read updated payload"),
+            Some(updated)
+        );
     }
 }
 

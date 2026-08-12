@@ -48,8 +48,8 @@ jobs:
       - name: Check shared desktop frontend
         run: npm run desktop:check
 
-      - name: Check Rust desktop backend
-        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+      - name: Test Rust desktop backend
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build NSIS installer
         run: npm run tauri -- build --bundles nsis
