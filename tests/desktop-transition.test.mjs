@@ -18,7 +18,7 @@ test("configures the lightweight Tauri desktop shell", async () => {
   const packageJson = JSON.parse(packageSource);
   const capability = JSON.parse(capabilitySource);
 
-  assert.equal(config.version, "1.2.2");
+  assert.equal(config.version, "1.3.0");
   assert.equal(packageJson.version, config.version);
   assert.equal(config.build.frontendDist, "../desktop-dist");
   assert.deepEqual(config.bundle.targets, ["nsis"]);
