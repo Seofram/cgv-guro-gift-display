@@ -18,6 +18,8 @@ test("configures the lightweight Tauri desktop shell", async () => {
   const packageJson = JSON.parse(packageSource);
   const capability = JSON.parse(capabilitySource);
 
+  assert.equal(config.version, "1.2.2");
+  assert.equal(packageJson.version, config.version);
   assert.equal(config.build.frontendDist, "../desktop-dist");
   assert.deepEqual(config.bundle.targets, ["nsis"]);
   assert.equal(config.bundle.windows.webviewInstallMode.type, "embedBootstrapper");
@@ -42,15 +44,24 @@ test("keeps the legacy SQLite location and adds native display commands", async 
   assert.match(source, /reads_and_updates_legacy_app_state_row/);
   assert.match(source, /mark_frontend_ready/);
   assert.match(source, /selects_a_non_primary_monitor_for_the_display_window/);
+  assert.match(source, /should_open_display_on_startup/);
+  assert.match(source, /--verify-display/);
 });
 
 test("builds and size-checks the NSIS installer on a Windows runner", async () => {
-  const workflow = await readFile(
-    new URL("../.github/workflows/windows-desktop.yml", import.meta.url),
-    "utf8",
-  );
+  const [workflow, verificationScript] = await Promise.all([
+    readFile(
+      new URL("../.github/workflows/windows-desktop.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../scripts/verify-desktop-install.ps1", import.meta.url),
+      "utf8",
+    ),
+  ]);
 
   assert.match(workflow, /runs-on: windows-latest/);
+  assert.match(workflow, /Parser.*ParseFile/s);
   assert.match(workflow, /push:\s*\n\s*branches:/);
   assert.match(workflow, /cargo test --locked/);
   assert.match(workflow, /tauri -- build --bundles nsis/);
@@ -67,4 +78,13 @@ test("builds and size-checks the NSIS installer on a Windows runner", async () =
   assert.match(workflow, /\$warm\.StartupMs -gt 2000/);
   assert.match(workflow, /General hydrated restart:/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
+  assert.match(verificationScript, /--verify-display/);
+  assert.match(verificationScript, /inventory\.pre-desktop-verification/);
+  assert.match(verificationScript, /Windows\.Forms\.Screen.*AllScreens/s);
+  assert.match(verificationScript, /DisplayFullscreen/);
+  assert.match(verificationScript, /ExistingDataConfirmedByOperator/);
+  assert.match(verificationScript, /WarmStartupMilliseconds/);
+  assert.match(verificationScript, /Warm startup exceeded 2000 ms/);
+  assert.match(verificationScript, /Get-NetTCPConnection -State Listen/);
+  assert.match(verificationScript, /\$installedBytes -gt 50MB/);
 });

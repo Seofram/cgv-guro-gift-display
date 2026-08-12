@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-
+import { stableGroupItemsByMovie } from "./item-order.mjs";
 import {
   closeDesktopDisplay,
   getDesktopDisplayStatus,
@@ -202,11 +202,18 @@ function cloneSample(): AppData {
   return JSON.parse(JSON.stringify(SAMPLE_DATA)) as AppData;
 }
 
+function normalizeMovieName(movie: string) {
+  return movie.trim();
+}
+
 function groupItems(items: GiftItem[]) {
   const groups: { movie: string; items: GiftItem[] }[] = [];
   for (const item of items) {
     const last = groups[groups.length - 1];
-    if (last?.movie === item.movie) {
+    if (
+      last &&
+      normalizeMovieName(last.movie) === normalizeMovieName(item.movie)
+    ) {
       last.items.push(item);
     } else {
       groups.push({ movie: item.movie, items: [item] });
@@ -245,7 +252,6 @@ export default function Home() {
     let disposed = false;
     const displayMode =
       new URLSearchParams(window.location.search).get("view") === "display";
-    // The URL is the source of truth when a native display window is created.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setView(displayMode ? "display" : "admin");
     document.body.classList.toggle("display-mode", displayMode);
@@ -518,6 +524,11 @@ function AdminScreen({
     window.setTimeout(() => setSavedPulse(false), 900);
   };
 
+  const pulseSaved = () => {
+    setSavedPulse(true);
+    window.setTimeout(() => setSavedPulse(false), 900);
+  };
+
   const addItem = () => {
     const today = localDateString();
     const yearEnd = `${new Date().getFullYear()}-12-31`;
@@ -539,6 +550,44 @@ function AdminScreen({
         },
       ],
     }));
+  };
+
+  const moveItem = (id: string, direction: -1 | 1) => {
+    setData((current) => {
+      const currentIndex = current.items.findIndex((item) => item.id === id);
+      const nextIndex = currentIndex + direction;
+
+      if (
+        currentIndex < 0 ||
+        nextIndex < 0 ||
+        nextIndex >= current.items.length
+      ) {
+        return current;
+      }
+
+      const items = [...current.items];
+      [items[currentIndex], items[nextIndex]] = [
+        items[nextIndex],
+        items[currentIndex],
+      ];
+
+      return {
+        ...current,
+        updatedAt: new Date().toISOString(),
+        items,
+      };
+    });
+    pulseSaved();
+  };
+
+  const groupSameMovies = () => {
+    setData((current) => ({
+      ...current,
+      updatedAt: new Date().toISOString(),
+      items: stableGroupItemsByMovie(current.items),
+    }));
+    pulseSaved();
+    showDisplayMessage("같은 영화 항목끼리 모았습니다.");
   };
 
   const removeItem = (id: string) => {
@@ -654,6 +703,7 @@ function AdminScreen({
       <header className="admin-topbar">
         <div className="brand-lockup">
           <div className="mini-logo">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/assets/cgv-logo.png"
               alt="CGV"
@@ -837,15 +887,25 @@ function AdminScreen({
               <p className="section-kicker">GIFT INVENTORY</p>
               <h3>경품 데이터</h3>
             </div>
-            <button className="add-button" onClick={addItem}>
-              + 항목 추가
-            </button>
+            <div className="inventory-heading-actions">
+              <button
+                type="button"
+                className="group-movies-button"
+                onClick={groupSameMovies}
+              >
+                같은 영화 모아 정렬
+              </button>
+              <button className="add-button" onClick={addItem}>
+                + 항목 추가
+              </button>
+            </div>
           </div>
 
           <div className="data-table-wrap">
             <table className="admin-table">
               <thead>
                 <tr>
+                  <th>순서</th>
                   <th>노출</th>
                   <th>영화명</th>
                   <th>관람 포맷</th>
@@ -857,7 +917,7 @@ function AdminScreen({
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((item) => {
+                {data.items.map((item, itemIndex) => {
                   const scheduleState = getScheduleState(item, now);
                   const effectivelyVisible =
                     item.visible && scheduleState.active;
@@ -877,6 +937,28 @@ function AdminScreen({
                   return (
                   <Fragment key={item.id}>
                   <tr className={rowClassName}>
+                    <td>
+                      <div className="order-controls">
+                        <button
+                          type="button"
+                          aria-label={`${item.movie} 위로 이동`}
+                          title="위로 이동"
+                          disabled={itemIndex === 0}
+                          onClick={() => moveItem(item.id, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`${item.movie} 아래로 이동`}
+                          title="아래로 이동"
+                          disabled={itemIndex === data.items.length - 1}
+                          onClick={() => moveItem(item.id, 1)}
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    </td>
                     <td>
                       <div className="visibility-cell">
                         <button
@@ -1027,7 +1109,7 @@ function AdminScreen({
                   </tr>
                   {expandedDayRow === item.id && (
                     <tr className="day-picker-row">
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <div className="day-picker-panel">
                           <div className="day-picker-copy">
                             <strong>{item.movie}</strong>
@@ -1266,12 +1348,6 @@ function DisplayScreen({ data }: { data: AppData }) {
   }, [data, now]);
 
   useEffect(() => {
-    // Reset pagination whenever filtering changes the number of pages.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPageIndex(0);
-  }, [pages.length]);
-
-  useEffect(() => {
     if (pages.length <= 1) return;
     const interval = window.setInterval(
       () => setPageIndex((current) => (current + 1) % pages.length),
@@ -1280,7 +1356,8 @@ function DisplayScreen({ data }: { data: AppData }) {
     return () => window.clearInterval(interval);
   }, [pages.length, data.settings.pageSeconds]);
 
-  const currentPage = pages[Math.min(pageIndex, pages.length - 1)] ?? [];
+  const safePageIndex = Math.min(pageIndex, pages.length - 1);
+  const currentPage = pages[safePageIndex] ?? [];
   const currentRowCount = currentPage.reduce(
     (total, group) => total + group.items.length,
     0,
@@ -1309,6 +1386,7 @@ function DisplayScreen({ data }: { data: AppData }) {
       >
         <header className="display-header">
           <div className="display-logo">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/assets/cgv-logo.png"
               alt="CGV"
@@ -1396,7 +1474,10 @@ function DisplayScreen({ data }: { data: AppData }) {
         {pages.length > 1 && (
           <div className="page-indicator">
             {pages.map((_, index) => (
-              <i key={index} className={index === pageIndex ? "active" : ""} />
+              <i
+                key={index}
+                className={index === safePageIndex ? "active" : ""}
+              />
             ))}
           </div>
         )}

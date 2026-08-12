@@ -103,6 +103,10 @@ fn mark_frontend_ready(window: WebviewWindow, view: String) -> Result<(), String
     window.set_title(title).map_err(|error| error.to_string())
 }
 
+fn should_open_display_on_startup(args: &[String]) -> bool {
+    args.iter().any(|argument| argument == "--verify-display")
+}
+
 fn choose_display_monitor_index(
     monitor_positions: &[(i32, i32)],
     primary_position: Option<(i32, i32)>,
@@ -276,13 +280,28 @@ mod tests {
         );
         assert_eq!(choose_display_monitor_index(&[], Some((0, 0))), None);
     }
+
+    #[test]
+    fn recognizes_the_operating_pc_display_verification_flag() {
+        assert!(should_open_display_on_startup(&[
+            "cgv-guro-gift-display.exe".to_string(),
+            "--verify-display".to_string(),
+        ]));
+        assert!(!should_open_display_on_startup(&[
+            "cgv-guro-gift-display.exe".to_string(),
+        ]));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let startup_arguments = std::env::args().collect::<Vec<_>>();
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             open_database(app.handle()).map_err(std::io::Error::other)?;
+            if should_open_display_on_startup(&startup_arguments) {
+                open_display_window(app.handle().clone(), false).map_err(std::io::Error::other)?;
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

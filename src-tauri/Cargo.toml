@@ -1,6 +1,6 @@
 [package]
 name = "cgv-guro-gift-display"
-version = "1.1.1"
+version = "1.2.2"
 description = "CGV 구로 경품 안내 Windows desktop application"
 authors = ["Seofram"]
 license = "UNLICENSED"
