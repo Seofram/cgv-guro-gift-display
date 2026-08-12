@@ -78,6 +78,57 @@ jobs:
             throw "Installer is $sizeMiB MiB and exceeds the 50 MiB target."
           }
 
+      - name: Verify warm startup is under two seconds
+        shell: pwsh
+        run: |
+          $application = Resolve-Path "src-tauri/target/release/cgv-guro-gift-display.exe"
+
+          function Measure-FirstWindow([string] $path, [int] $timeoutMs = 15000) {
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            $process = Start-Process -FilePath $path -PassThru
+
+            while ($timer.ElapsedMilliseconds -lt $timeoutMs) {
+              Start-Sleep -Milliseconds 25
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Desktop application exited before creating its main window."
+              }
+              if ($process.MainWindowHandle -ne 0) {
+                $timer.Stop()
+                return @{
+                  Process = $process
+                  StartupMs = $timer.ElapsedMilliseconds
+                }
+              }
+            }
+
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Desktop application did not create a main window within $timeoutMs ms."
+          }
+
+          function Stop-DesktopApplication($measurement) {
+            $measurement.Process.CloseMainWindow() | Out-Null
+            if (-not $measurement.Process.WaitForExit(5000)) {
+              $measurement.Process.Kill()
+              $measurement.Process.WaitForExit()
+            }
+          }
+
+          $cold = Measure-FirstWindow $application
+          Stop-DesktopApplication $cold
+          Start-Sleep -Milliseconds 250
+
+          $warm = Measure-FirstWindow $application
+          Stop-DesktopApplication $warm
+
+          "### Windows startup measurement" >> $env:GITHUB_STEP_SUMMARY
+          "- First launch: **$($cold.StartupMs) ms**" >> $env:GITHUB_STEP_SUMMARY
+          "- General restart: **$($warm.StartupMs) ms** / 2000 ms" >> $env:GITHUB_STEP_SUMMARY
+
+          if ($warm.StartupMs -gt 2000) {
+            throw "General restart took $($warm.StartupMs) ms and exceeds the 2000 ms target."
+          }
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
