@@ -46,6 +46,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     cleanScript,
     bootstrap,
     packageJson,
+    css,
   ] = await Promise.all([
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -56,6 +57,7 @@ test("keeps the Windows launchers and display controls in the package", async ()
     readFile(new URL("../scripts/clean-uninstall.ps1", import.meta.url), "utf8"),
     readFile(new URL("../scripts/bootstrap-node.ps1", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(layout, /title:\s*"CGV 구로 경품 안내"/);
@@ -73,7 +75,9 @@ test("keeps the Windows launchers and display controls in the package", async ()
   assert.match(cleanScript, /node_modules/);
   assert.match(bootstrap, /\$nodeVersion = "22\.23\.2"/);
   assert.match(packageJson, /"name": "cgv-guro-gift-display"/);
-  assert.match(packageJson, /"version": "1\.3\.0"/);
+  assert.match(packageJson, /"version": "1\.3\.1"/);
+  assert.match(page, /translate\(-50%, -50%\) scale/);
+  assert.doesNotMatch(css, /translate:\s*-50% -50%/);
 
   await access(new URL("../build/sites-vite-plugin.ts", import.meta.url));
 

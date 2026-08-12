@@ -136,19 +136,15 @@ fn open_display_window(app: AppHandle, preview: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut builder = WebviewWindowBuilder::new(
-        &app,
-        label,
-        WebviewUrl::App("index.html?view=display".into()),
-    )
-    .title(if preview {
-        "CGV 구로 경품 전시 미리보기"
-    } else {
-        "CGV 구로 경품 전시 화면"
-    })
-    .decorations(preview)
-    .always_on_top(!preview)
-    .resizable(preview);
+    let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("index.html".into()))
+        .title(if preview {
+            "CGV 구로 경품 전시 미리보기"
+        } else {
+            "CGV 구로 경품 전시 화면"
+        })
+        .decorations(preview)
+        .always_on_top(!preview)
+        .resizable(preview);
 
     if preview {
         builder = builder.inner_size(720.0, 576.0).center();

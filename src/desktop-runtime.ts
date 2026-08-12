@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 export type DesktopDisplayStatus = {
   controller: boolean;
@@ -13,6 +14,14 @@ export type DesktopDisplayStatus = {
 
 export function isDesktopRuntime() {
   return "__TAURI_INTERNALS__" in window;
+}
+
+export function getDesktopView(): "admin" | "display" | null {
+  if (!isDesktopRuntime()) return null;
+  const label = getCurrentWebviewWindow().label;
+  return label === "display" || label === "monitor-preview"
+    ? "display"
+    : "admin";
 }
 
 export async function loadDesktopData<T>() {
