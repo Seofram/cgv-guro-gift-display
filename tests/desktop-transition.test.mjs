@@ -59,6 +59,8 @@ test("builds and size-checks the NSIS installer on a Windows runner", async () =
   assert.match(workflow, /forbiddenRuntime/);
   assert.match(workflow, /Installed footprint/);
   assert.match(workflow, /Measure-ReadyScreen/);
+  assert.match(workflow, /Measure-ReadyScreen \$application 45000/);
+  assert.match(workflow, /Measure-ReadyScreen \$application 15000/);
   assert.match(workflow, /MainWindowTitle -eq \$readyTitle/);
   assert.match(workflow, /Get-NetTCPConnection -State Listen/);
   assert.match(workflow, /CGVGiftDisplay\\inventory\.db/);

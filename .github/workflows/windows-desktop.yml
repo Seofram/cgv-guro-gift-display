@@ -162,7 +162,10 @@ jobs:
           }
 
           try {
-            $cold = Measure-ReadyScreen $application
+            # A fresh hosted runner can spend extra time provisioning WebView2 on
+            # the first launch. Keep that one-time cost separate from the warm
+            # restart target that users experience during normal operation.
+            $cold = Measure-ReadyScreen $application 45000
             $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
               Where-Object OwningProcess -eq $cold.Process.Id
             if ($listeners) {
@@ -176,7 +179,7 @@ jobs:
               throw "The legacy-compatible inventory database was not created at $database."
             }
 
-            $warm = Measure-ReadyScreen $application
+            $warm = Measure-ReadyScreen $application 15000
             Stop-DesktopApplication $warm
 
             "First hydrated screen: $($cold.StartupMs) ms"
