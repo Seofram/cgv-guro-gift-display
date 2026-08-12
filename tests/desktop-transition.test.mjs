@@ -40,3 +40,16 @@ test("keeps the legacy SQLite location and adds native display commands", async 
   assert.match(source, /open_display_window/);
   assert.match(source, /inventory-updated/);
 });
+
+test("builds and size-checks the NSIS installer on a Windows runner", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/windows-desktop.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflow, /runs-on: windows-latest/);
+  assert.match(workflow, /cargo check --locked/);
+  assert.match(workflow, /tauri -- build --bundles nsis/);
+  assert.match(workflow, /\$limit = 50MB/);
+  assert.match(workflow, /actions\/upload-artifact@v4/);
+});
