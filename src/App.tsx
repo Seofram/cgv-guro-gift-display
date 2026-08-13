@@ -2,17 +2,6 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { stableGroupItemsByMovie } from "./item-order.mjs";
-import {
-  closeDesktopDisplay,
-  getDesktopView,
-  getDesktopDisplayStatus,
-  isDesktopRuntime,
-  loadDesktopData,
-  markDesktopReady,
-  openDesktopDisplay,
-  saveDesktopData,
-  subscribeToDesktopData,
-} from "./desktop-runtime";
 
 type GiftStatus =
   | "available"
@@ -58,9 +47,14 @@ type DisplayMonitorStatus = {
 };
 
 const STORAGE_KEY = "cgv-guro-gift-display-v1";
-const CONTROLLER_URL = "http://127.0.0.1:3210";
+const CONTROLLER_URL = "";
 const DAYS = ["일", "월", "화", "수", "목", "금", "토"];
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+
+function serverDate(value: string) {
+  const numeric = Number(value);
+  return new Date(Number.isFinite(numeric) ? numeric : value);
+}
 
 const STATUS_META: Record<
   GiftStatus,
@@ -252,7 +246,6 @@ export default function Home() {
   useEffect(() => {
     let disposed = false;
     const displayMode =
-      getDesktopView() === "display" ||
       new URLSearchParams(window.location.search).get("view") === "display";
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setView(displayMode ? "display" : "admin");
@@ -271,30 +264,22 @@ export default function Home() {
     const hydrate = async () => {
       let controllerData: AppData | null = null;
       let resetRequested = false;
-      if (isDesktopRuntime()) {
-        try {
-          controllerData = await loadDesktopData<AppData>();
-        } catch {
-          controllerData = null;
+      try {
+        const response = await fetch(`${CONTROLLER_URL}/data`, {
+          cache: "no-store",
+        });
+        const result = (await response.json()) as {
+          ok: boolean;
+          data?: AppData;
+          reset?: boolean;
+        };
+        if (response.ok) {
+          controllerData = result.data ?? null;
+        } else if (response.status === 404) {
+          resetRequested = Boolean(result.reset);
         }
-      } else {
-        try {
-          const response = await fetch(`${CONTROLLER_URL}/data`, {
-            cache: "no-store",
-          });
-          const result = (await response.json()) as {
-            ok: boolean;
-            data?: AppData;
-            reset?: boolean;
-          };
-          if (response.ok) {
-            controllerData = result.data ?? null;
-          } else if (response.status === 404) {
-            resetRequested = Boolean(result.reset);
-          }
-        } catch {
-          controllerData = null;
-        }
+      } catch {
+        controllerData = null;
       }
 
       if (disposed) return;
@@ -324,15 +309,11 @@ export default function Home() {
     if (!hydrated) return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     if (view === "admin") {
-      if (isDesktopRuntime()) {
-        void saveDesktopData(data).catch(() => undefined);
-      } else {
-        void fetch(`${CONTROLLER_URL}/data`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(data),
-        }).catch(() => undefined);
-      }
+      void fetch(`${CONTROLLER_URL}/data`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      }).catch(() => undefined);
     }
   }, [data, hydrated, view]);
 
@@ -344,33 +325,12 @@ export default function Home() {
         : "CGV 구로 경품 관리";
     document.title = readyTitle;
     document.documentElement.dataset.appReady = "true";
-    if (isDesktopRuntime()) {
-      void markDesktopReady(view).catch(() => undefined);
-    }
   }, [hydrated, view]);
 
   useEffect(() => {
     if (!hydrated || view !== "display") return;
 
     let disposed = false;
-    let unsubscribe: (() => void) | undefined;
-
-    if (isDesktopRuntime()) {
-      void subscribeToDesktopData<AppData>((nextData) => {
-        if (!disposed) setData(nextData);
-      }).then((nextUnsubscribe) => {
-        if (disposed) {
-          nextUnsubscribe();
-        } else {
-          unsubscribe = nextUnsubscribe;
-        }
-      });
-      return () => {
-        disposed = true;
-        unsubscribe?.();
-      };
-    }
-
     const syncDisplayData = async () => {
       try {
         const response = await fetch(`${CONTROLLER_URL}/data`, {
@@ -450,16 +410,12 @@ function AdminScreen({
 
     const checkDisplayStatus = async () => {
       try {
-        const result = isDesktopRuntime()
-          ? await getDesktopDisplayStatus()
-          : await (async () => {
-              const response = await fetch(
-                `${CONTROLLER_URL}/display/status`,
-                { cache: "no-store" },
-              );
-              if (!response.ok) throw new Error("status unavailable");
-              return (await response.json()) as DisplayMonitorStatus;
-            })();
+        const response = await fetch(
+          `${CONTROLLER_URL}/display/status`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) throw new Error("status unavailable");
+        const result = (await response.json()) as DisplayMonitorStatus;
         if (disposed) return;
         setMonitorStatus({ ...result, controller: true });
 
@@ -632,12 +588,6 @@ function AdminScreen({
   };
 
   const requestDisplayController = async (action: "open" | "close") => {
-    if (isDesktopRuntime()) {
-      if (action === "open") await openDesktopDisplay(false);
-      else await closeDesktopDisplay();
-      return;
-    }
-
     const response = await fetch(`http://127.0.0.1:3210/display/${action}`, {
       method: "POST",
     });
@@ -647,16 +597,12 @@ function AdminScreen({
   const openDisplay = async () => {
     setDisplayAction("opening");
     try {
-      if (isDesktopRuntime()) {
-        await saveDesktopData(data);
-      } else {
-        const syncResponse = await fetch(`${CONTROLLER_URL}/data`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(data),
-        });
-        if (!syncResponse.ok) throw new Error("display data sync failed");
-      }
+      const syncResponse = await fetch(`${CONTROLLER_URL}/data`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!syncResponse.ok) throw new Error("display data sync failed");
       await requestDisplayController("open");
       showDisplayMessage("모니터 2에 전시 화면을 열었습니다.");
     } catch {
@@ -686,13 +632,6 @@ function AdminScreen({
   };
 
   const openMonitor = () => {
-    if (isDesktopRuntime()) {
-      void openDesktopDisplay(true).catch(() => {
-        showDisplayMessage("미리보기 창을 열지 못했습니다.");
-      });
-      return;
-    }
-
     window.open(
       `${window.location.pathname}?view=display`,
       "cgv-gift-monitor",
@@ -737,7 +676,7 @@ function AdminScreen({
             }`}
             title={
               monitorStatus?.lastSyncAt
-                ? `마지막 동기화: ${new Date(
+                ? `마지막 동기화: ${serverDate(
                     monitorStatus.lastSyncAt,
                   ).toLocaleString("ko-KR")}`
                 : "동기화 정보 없음"
@@ -754,7 +693,7 @@ function AdminScreen({
               </strong>
               <small>
                 {monitorStatus?.lastSyncAt
-                  ? `동기화 ${new Date(
+                  ? `동기화 ${serverDate(
                       monitorStatus.lastSyncAt,
                     ).toLocaleTimeString("ko-KR", {
                       hour: "2-digit",
@@ -1290,7 +1229,7 @@ function AdminScreen({
                 <>
                   <br />
                   감지 시각:{" "}
-                  {new Date(abnormalExit.at).toLocaleString("ko-KR")}
+                  {serverDate(abnormalExit.at).toLocaleString("ko-KR")}
                 </>
               )}
             </p>

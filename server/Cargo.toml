@@ -1,0 +1,17 @@
+[package]
+name = "cgv-gift-server"
+version = "1.4.0"
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+
+[dependencies]
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+serde_json = "1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

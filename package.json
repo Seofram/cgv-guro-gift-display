@@ -1,52 +1,32 @@
 {
   "name": "cgv-guro-gift-display",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "private": true,
   "packageManager": "npm@10.9.2",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
-    "build": "vinext build",
-    "start": "vinext start",
-    "test": "npm run build && node --test tests/controller-storage.test.mjs tests/item-order.test.mjs tests/rendered-html.test.mjs tests/desktop-transition.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern src-tauri/target",
-    "db:generate": "drizzle-kit generate",
-    "desktop:dev": "vite --config vite.desktop.config.ts",
-    "desktop:build": "vite build --config vite.desktop.config.ts",
-    "desktop:check": "tsc --noEmit -p tsconfig.desktop.json && npm run desktop:build",
-    "tauri": "tauri"
+    "dev": "vite --config vite.server.config.ts",
+    "build": "npm run server:build",
+    "test": "npm run server:check && node --test tests/item-order.test.mjs tests/server-transition.test.mjs",
+    "lint": "tsc --noEmit -p tsconfig.server.json",
+    "server:build": "vite build --config vite.server.config.ts",
+    "server:check": "tsc --noEmit -p tsconfig.server.json && npm run server:build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1",
-    "drizzle-orm": "0.45.2",
-    "next": "16.2.12",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.50.0",
-    "@tauri-apps/cli": "^2.11.4",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.5",
-    "@vitejs/plugin-rsc": "0.5.32",
-    "drizzle-kit": "0.31.10",
-    "eslint": "9.39.4",
-    "eslint-config-next": "16.2.12",
-    "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.2.0",
-    "wrangler": "4.118.0"
-  },
-  "overrides": {
-    "postcss": "8.5.25",
-    "sharp": "0.35.3"
+    "vite": "8.2.0"
   },
   "type": "module"
 }
