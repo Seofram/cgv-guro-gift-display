@@ -361,13 +361,19 @@ try {
         $request = Read-HttpRequest -Stream $stream
         Invoke-Request -Request $request -Stream $stream
       } catch {
-        Write-JsonResponse -Stream $stream -Status 400 -Value @{
-          ok = $false
-          message = $_.Exception.Message
+        try {
+          Write-JsonResponse -Stream $stream -Status 400 -Value @{
+            ok = $false
+            message = $_.Exception.Message
+          }
+        } catch {
+          # A browser or health probe may close the socket before the reply.
         }
       } finally {
         $stream.Dispose()
       }
+    } catch {
+      # A single disconnected client must not stop the local server.
     } finally {
       $client.Close()
     }
