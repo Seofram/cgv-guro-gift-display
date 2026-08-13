@@ -9,8 +9,9 @@
 5. **모니터링 열기**는 관리 모니터에서 전시 내용을 작은 창으로 확인합니다.
 6. **전시 종료**는 보조 모니터의 전시 창만 닫습니다.
 
-실행 시 CMD 창은 곧바로 닫히며, 백그라운드에는 작은 로컬 서버 하나만 남습니다.
-Node.js, npm, Tauri 설치나 인터넷 연결은 필요하지 않습니다.
+실행 시 CMD 창은 곧바로 닫히며, 백그라운드에는 Windows PowerShell 로컬 서버
+하나만 남습니다. 별도 EXE, Node.js, npm, Tauri 설치나 인터넷 연결은 필요하지
+않습니다.
 
 ## Chrome으로 변경
 
@@ -55,6 +56,8 @@ Node.js, npm, Tauri 설치나 인터넷 연결은 필요하지 않습니다.
   `"ok": true`가 보이는지 확인합니다.
 - 서버 시작 오류는
   `%LOCALAPPDATA%\CGVGiftDisplay\server-error.log`에 기록됩니다.
+- PowerShell 실행 자체가 차단됐다는 메시지가 나오면 사내 정책에서
+  `powershell.exe`와 로컬 `.ps1` 실행이 허용되는지 담당자에게 확인합니다.
 - 데이터만 초기화하려면 `reset-data.bat`, 데이터와 전용 브라우저 프로필까지
   지우려면 `clean-uninstall.bat`를 사용합니다.
 

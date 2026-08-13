@@ -10,7 +10,8 @@ $stateDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
 $stateFile = Join-Path $stateDirectory "display-window.txt"
 
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type @"
+if (-not ("CgvDisplayWindow" -as [type])) {
+  Add-Type @"
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -125,6 +126,7 @@ public static class CgvDisplayWindow {
     }
 }
 "@
+}
 
 function Get-TrackedDisplayHandles {
   param([IntPtr[]]$KnownHandles)

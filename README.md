@@ -3,18 +3,19 @@
 Windows 듀얼 모니터 환경을 위한 경품 관리·전시 도구입니다. 관리 화면에서
 영화·경품·재고 정보를 수정하면 보조 모니터의 전시 화면에 즉시 반영됩니다.
 
-## v1.4 경량 구조
+## v1.4.1 EXE 없는 경량 구조
 
 - 정적 Vite + React 화면
-- 단일 Rust 로컬 서버(`127.0.0.1:3210`)
+- Windows PowerShell 5.1 로컬 서버(`127.0.0.1:3210`)
 - 기존 `%LOCALAPPDATA%\CGVGiftDisplay\inventory.db` SQLite 데이터 호환
 - 설치된 Microsoft Edge 또는 Google Chrome을 앱·키오스크 모드로 사용
-- 운영 패키지에 Node.js, npm, Tauri, 브라우저 엔진을 포함하지 않음
-- Windows CI에서 압축 해제 용량 25 MiB 이하와 서버 준비 300ms 이하 검증
+- 운영 패키지에 자체 EXE, Node.js, npm, Tauri, 브라우저 엔진을 포함하지 않음
+- Windows 내장 `winsqlite3.dll`로 기존 SQLite 파일을 직접 사용
+- Windows CI에서 압축 해제 용량 10 MiB 이하와 서버 준비 3초 이하 검증
 
-기존의 Tauri/WebView와 Vinext 개발 서버, 휴대용 Node 자동 설치 과정은 제거했습니다.
-ZIP을 풀고 배치 파일을 실행하면 작은 서버 하나만 시작되며, 화면 렌더링은 이미
-설치된 브라우저가 담당합니다.
+기존의 Tauri/WebView, Rust EXE, Vinext 개발 서버와 휴대용 Node 자동 설치 과정은
+제거했습니다. ZIP을 풀고 배치 파일을 실행하면 Windows에 포함된 PowerShell
+프로세스 하나만 시작되며, 화면 렌더링은 이미 설치된 브라우저가 담당합니다.
 
 ## 주요 기능
 
@@ -33,8 +34,9 @@ ZIP을 풀고 배치 파일을 실행하면 작은 서버 하나만 시작되며
 3. `start-local.bat`를 실행합니다.
 4. 관리 화면 오른쪽 위의 **전시 화면 열기**를 누릅니다.
 
-관리자 권한과 Node.js 설치는 필요하지 않습니다. Edge가 기본값이며 Chrome으로
-바꾸는 방법은 아래에 있습니다.
+관리자 권한, 자체 EXE 실행 허용, Node.js 설치는 필요하지 않습니다. Windows 10
+버전 1511 이상과 Windows PowerShell 5.1을 대상으로 합니다. Edge가 기본값이며
+Chrome으로 바꾸는 방법은 아래에 있습니다.
 
 ## Edge 또는 Chrome 선택
 
@@ -75,13 +77,10 @@ Node.js는 프런트엔드 빌드 PC에서만 필요하며 운영 ZIP에는 포�
     npm ci
     npm run lint
     npm test
-    cargo fmt --manifest-path server/Cargo.toml -- --check
-    cargo test --locked --manifest-path server/Cargo.toml
-    cargo build --locked --release --manifest-path server/Cargo.toml
-
-Windows 워크플로는 정적 화면, Rust 서버, SQLite 저장/조회, 서버 준비 시간,
-25 MiB 용량 제한 및 Node/Tauri 미포함을 패키지 자체에서 확인합니다. 실제 물리적
-듀얼 모니터의 창 위치는 릴리즈 배포 전 Windows 운영 PC에서 최종 확인해야 합니다.
+Windows 워크플로는 PowerShell 5.1에서 정적 화면, WinSQLite 저장/조회와 재시작,
+UTF-8 한글, 서버 준비 시간, 10 MiB 제한 및 EXE/Node/Tauri 미포함을 패키지
+자체에서 확인합니다. 실제 물리적 듀얼 모니터의 창 위치는 릴리즈 배포 전 Windows
+운영 PC에서 최종 확인해야 합니다.
 
 나눔 글꼴의 저작권과 재배포 조건은
 `public/fonts/LICENSE-NANUM-FONT.txt`를 확인하세요. CGV 명칭과 로고 사용 권한은
