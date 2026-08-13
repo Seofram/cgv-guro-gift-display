@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "browser.ps1")
 $stateDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
 $stateFile = Join-Path $stateDirectory "display-window.txt"
 
@@ -125,22 +126,6 @@ public static class CgvDisplayWindow {
 }
 "@
 
-function Get-EdgePath {
-  $candidates = @(
-    (Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"),
-    (Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"),
-    (Join-Path $env:LOCALAPPDATA "Microsoft\Edge\Application\msedge.exe")
-  )
-
-  foreach ($candidate in $candidates) {
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-      return $candidate
-    }
-  }
-
-  throw "Microsoft Edge를 찾을 수 없습니다."
-}
-
 function Get-TrackedDisplayHandles {
   param([IntPtr[]]$KnownHandles)
 
@@ -250,22 +235,25 @@ if (-not $targetScreen) {
 }
 
 $bounds = $targetScreen.Bounds
-$edgePath = Get-EdgePath
-$existingEdgeHandles = @(
-  [CgvDisplayWindow]::FindProcessWindows("msedge") |
+$browser = Get-CgvBrowser
+$existingBrowserHandles = @(
+  [CgvDisplayWindow]::FindProcessWindows($browser.ProcessName) |
     ForEach-Object { $_.ToInt64() }
 )
 $arguments = @(
   "--kiosk",
-  "http://localhost:3000/?view=display",
-  "--edge-kiosk-type=fullscreen",
+  "http://127.0.0.1:3210/?view=display",
+  "--user-data-dir=$($browser.DisplayProfileDirectory)",
   "--no-first-run",
   "--disable-session-crashed-bubble",
   "--window-position=$($bounds.X),$($bounds.Y)",
   "--window-size=$($bounds.Width),$($bounds.Height)"
 )
+if ($browser.Name -eq "edge") {
+  $arguments += "--edge-kiosk-type=fullscreen"
+}
 
-Start-Process -FilePath $edgePath -ArgumentList $arguments | Out-Null
+Start-Process -FilePath $browser.Path -ArgumentList $arguments | Out-Null
 
 $handle = [IntPtr]::Zero
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
@@ -273,17 +261,17 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
   $displayHandles = @(
     [CgvDisplayWindow]::FindWindows("CGV 구로 경품 전시 화면")
   )
-  $newEdgeHandles = @(
-    [CgvDisplayWindow]::FindProcessWindows("msedge") |
-      Where-Object { $existingEdgeHandles -notcontains $_.ToInt64() }
+  $newBrowserHandles = @(
+    [CgvDisplayWindow]::FindProcessWindows($browser.ProcessName) |
+      Where-Object { $existingBrowserHandles -notcontains $_.ToInt64() }
   )
 
   if ($displayHandles.Count -gt 0) {
     $handle = $displayHandles[0]
     break
   }
-  if ($newEdgeHandles.Count -gt 0) {
-    $handle = $newEdgeHandles[0]
+  if ($newBrowserHandles.Count -gt 0) {
+    $handle = $newBrowserHandles[0]
     break
   }
 }

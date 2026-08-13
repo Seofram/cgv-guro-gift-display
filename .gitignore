@@ -41,6 +41,8 @@ yarn-error.log*
 next-env.d.ts
 /dist/
 /desktop-dist/
+/server-dist/
+/server/target/
 *.tsbuildinfo
 /.wrangler/
 /.controller-test/

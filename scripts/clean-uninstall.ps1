@@ -35,27 +35,11 @@ if ((Split-Path $runtimeDirectory -Leaf) -ne "CGVGiftDisplay") {
   throw "로컬 데이터 경로를 확인하지 못했습니다."
 }
 
-$generatedDirectories = @(
-  ".runtime",
-  "node_modules",
-  ".next",
-  ".vinext",
-  ".wrangler",
-  ".npm-cache",
-  "build",
-  "dist"
-) | ForEach-Object {
-  Assert-ChildPath `
-    -Parent $projectDirectory `
-    -Target (Join-Path $projectDirectory $_)
-}
-
 Write-Host ""
 Write-Host "다음 항목을 제거합니다."
 Write-Host "- 영화, 경품, 재고, 주의사항 데이터"
 Write-Host "- 전시 제어 로그와 실행 상태"
-Write-Host "- 자동 준비된 Node.js와 설치된 구성요소"
-Write-Host "- 로컬 빌드 캐시"
+Write-Host "- CGV 전용 Edge/Chrome 프로필"
 Write-Host ""
 Write-Host "프로그램 소스와 이 제거 파일은 남습니다."
 $confirmation = Read-Host "계속하려면 '제거'를 입력하세요"
@@ -74,40 +58,42 @@ try {
   # The display controller may already be stopped.
 }
 
-$processTargets = @(
-  @{ Port = 3210; Match = "display-controller.mjs" },
-  @{ Port = 3000; Match = $projectDirectory }
+$serverPath = [IO.Path]::GetFullPath(
+  (Join-Path $projectDirectory "cgv-gift-server.exe")
 )
-
-foreach ($target in $processTargets) {
-  $connections = @(
-    Get-NetTCPConnection `
-      -LocalPort $target.Port `
-      -State Listen `
-      -ErrorAction SilentlyContinue
-  )
-
-  foreach ($connection in $connections) {
-    $ownerPid = $connection.OwningProcess
-    $processInfo = Get-CimInstance `
-      -ClassName Win32_Process `
-      -Filter "ProcessId = $ownerPid" `
-      -ErrorAction SilentlyContinue
-
-    if ($processInfo.CommandLine -like "*$($target.Match)*") {
-      Stop-Process -Id $ownerPid -Force -ErrorAction Stop
-    }
+$connections = @(
+  Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue
+)
+foreach ($connection in $connections) {
+  $processInfo = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+  if (
+    $processInfo -and
+    $processInfo.Path -and
+    ([IO.Path]::GetFullPath($processInfo.Path) -eq $serverPath)
+  ) {
+    Stop-Process -Id $processInfo.Id -Force -ErrorAction Stop
   }
 }
 
 Start-Sleep -Milliseconds 700
 
+$profileMarker = [IO.Path]::Combine(
+  $runtimeDirectory,
+  "browser-profile-"
+)
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.Name -in @("msedge.exe", "chrome.exe") -and
+    $_.CommandLine -and
+    $_.CommandLine.IndexOf(
+      $profileMarker,
+      [StringComparison]::OrdinalIgnoreCase
+    ) -ge 0
+  } |
+  ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+
 if (Test-Path -LiteralPath $runtimeDirectory) {
   Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force
-}
-
-foreach ($directory in $generatedDirectories) {
-  if (Test-Path -LiteralPath $directory) {
-    Remove-Item -LiteralPath $directory -Recurse -Force
-  }
 }

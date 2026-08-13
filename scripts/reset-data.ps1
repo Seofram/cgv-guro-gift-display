@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$projectDirectory = Split-Path $PSScriptRoot -Parent
+$installDirectory = Split-Path $PSScriptRoot -Parent
 $runtimeDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
 
 Write-Host ""
@@ -21,29 +21,20 @@ try {
   # The display controller may already be stopped.
 }
 
-$processTargets = @(
-  @{ Port = 3210; Match = "display-controller.mjs" },
-  @{ Port = 3000; Match = $projectDirectory }
+$serverPath = [IO.Path]::GetFullPath(
+  (Join-Path $installDirectory "cgv-gift-server.exe")
 )
-
-foreach ($target in $processTargets) {
-  $connections = @(
-    Get-NetTCPConnection `
-      -LocalPort $target.Port `
-      -State Listen `
-      -ErrorAction SilentlyContinue
-  )
-
-  foreach ($connection in $connections) {
-    $ownerPid = $connection.OwningProcess
-    $processInfo = Get-CimInstance `
-      -ClassName Win32_Process `
-      -Filter "ProcessId = $ownerPid" `
-      -ErrorAction SilentlyContinue
-
-    if ($processInfo.CommandLine -like "*$($target.Match)*") {
-      Stop-Process -Id $ownerPid -Force -ErrorAction Stop
-    }
+$connections = @(
+  Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue
+)
+foreach ($connection in $connections) {
+  $processInfo = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+  if (
+    $processInfo -and
+    $processInfo.Path -and
+    ([IO.Path]::GetFullPath($processInfo.Path) -eq $serverPath)
+  ) {
+    Stop-Process -Id $processInfo.Id -Force -ErrorAction Stop
   }
 }
 

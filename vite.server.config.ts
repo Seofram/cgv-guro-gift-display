@@ -3,14 +3,15 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
-  clearScreen: false,
   server: {
-    host: "127.0.0.1",
-    port: 5173,
-    strictPort: true,
+    proxy: {
+      "/data": "http://127.0.0.1:3210",
+      "/display": "http://127.0.0.1:3210",
+      "/health": "http://127.0.0.1:3210",
+    },
   },
   build: {
-    outDir: "desktop-dist",
+    outDir: "server-dist",
     emptyOutDir: true,
   },
 });
