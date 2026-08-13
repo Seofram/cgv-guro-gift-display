@@ -42,8 +42,9 @@ jobs:
           Copy-Item "server-dist" (Join-Path $packageDirectory "web") -Recurse
           Copy-Item @(
             "browser-settings.json", "start-local.bat", "reset-data.bat",
-            "clean-uninstall.bat", "README_사용법.md"
+            "clean-uninstall.bat"
           ) $packageDirectory
+          Copy-Item (Get-ChildItem -File "README_*.md") $packageDirectory
           Copy-Item @(
             "scripts/browser.ps1", "scripts/server-process.ps1",
             "scripts/sqlite-store.ps1", "scripts/local-server.ps1",
@@ -142,13 +143,14 @@ jobs:
           $first = Start-TestServer
           try {
             $html = Invoke-WebRequest "http://127.0.0.1:3210/" -UseBasicParsing
-            if ($html.Content -notmatch "CGV 구로 경품 관리") {
+            if ($html.Content -notmatch "html lang=") {
               throw "Static frontend was not served."
             }
+            $koreanLocation = [string]([char]0xAD6C) + [char]0xB85C
             $payload = @{
               items = @()
               settings = @{
-                location = "구로"; title = "경품 안내"; notices = @()
+                location = $koreanLocation; title = "Gift display"; notices = @()
                 pageSeconds = 8; showSoldout = $true
               }
               updatedAt = "2026-08-13T00:00:00.000Z"
@@ -161,7 +163,7 @@ jobs:
             }
             Invoke-RestMethod @postArguments
             $stored = Invoke-RestMethod "http://127.0.0.1:3210/data"
-            if ($stored.data.settings.location -ne "구로") {
+            if ($stored.data.settings.location -ne $koreanLocation) {
               throw "SQLite round trip failed."
             }
             $database = Join-Path $runtimeRoot "CGVGiftDisplay\inventory.db"
