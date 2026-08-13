@@ -4,6 +4,7 @@ $localAppDataDirectory = [IO.Path]::GetFullPath($env:LOCALAPPDATA)
 $runtimeDirectory = [IO.Path]::GetFullPath(
   (Join-Path $localAppDataDirectory "CGVGiftDisplay")
 )
+. (Join-Path $PSScriptRoot "server-process.ps1")
 
 function Assert-ChildPath {
   param(
@@ -58,22 +59,7 @@ try {
   # The display controller may already be stopped.
 }
 
-$serverPath = [IO.Path]::GetFullPath(
-  (Join-Path $projectDirectory "cgv-gift-server.exe")
-)
-$connections = @(
-  Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue
-)
-foreach ($connection in $connections) {
-  $processInfo = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
-  if (
-    $processInfo -and
-    $processInfo.Path -and
-    ([IO.Path]::GetFullPath($processInfo.Path) -eq $serverPath)
-  ) {
-    Stop-Process -Id $processInfo.Id -Force -ErrorAction Stop
-  }
-}
+Stop-CgvServer
 
 Start-Sleep -Milliseconds 700
 

@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $installDirectory = Split-Path $PSScriptRoot -Parent
 $runtimeDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
+. (Join-Path $PSScriptRoot "server-process.ps1")
 
 Write-Host ""
 Write-Host "CGV 경품 안내의 영화, 경품, 재고, 주의사항 데이터를 모두 제거합니다."
@@ -21,22 +22,7 @@ try {
   # The display controller may already be stopped.
 }
 
-$serverPath = [IO.Path]::GetFullPath(
-  (Join-Path $installDirectory "cgv-gift-server.exe")
-)
-$connections = @(
-  Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue
-)
-foreach ($connection in $connections) {
-  $processInfo = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
-  if (
-    $processInfo -and
-    $processInfo.Path -and
-    ([IO.Path]::GetFullPath($processInfo.Path) -eq $serverPath)
-  ) {
-    Stop-Process -Id $processInfo.Id -Force -ErrorAction Stop
-  }
-}
+Stop-CgvServer
 
 Start-Sleep -Milliseconds 500
 New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
