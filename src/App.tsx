@@ -1,6 +1,10 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { DateRangeEditor } from "./DateRangeEditor";
+import { UpdateCheck } from "./UpdateCheck";
+import { newItemDates, getScheduleState, normalizeAppData } from "./schedule.mjs";
+import { buildDisplayPages } from "./display-pages.mjs";
 import { stableGroupItemsByMovie } from "./item-order.mjs";
 
 type GiftStatus =
@@ -28,6 +32,7 @@ type DisplaySettings = {
   notices: string[];
   pageSeconds: number;
   showSoldout: boolean;
+  rotateNotices: boolean;
 };
 
 type AppData = {
@@ -168,30 +173,10 @@ const SAMPLE_DATA: AppData = {
     ],
     pageSeconds: 8,
     showSoldout: true,
+    rotateNotices: false,
   },
   updatedAt: new Date().toISOString(),
 };
-
-function localDateString(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function getScheduleState(item: GiftItem, date: Date) {
-  const today = localDateString(date);
-  if (item.endDate && item.endDate < today) {
-    return { active: false, reason: "expired", label: "만료" } as const;
-  }
-  if (item.startDate && item.startDate > today) {
-    return { active: false, reason: "upcoming", label: "시작 전" } as const;
-  }
-  if (!item.days.includes(date.getDay())) {
-    return { active: false, reason: "offday", label: "오늘 제외" } as const;
-  }
-  return { active: true, reason: "active", label: "노출 중" } as const;
-}
 
 function cloneSample(): AppData {
   return JSON.parse(JSON.stringify(SAMPLE_DATA)) as AppData;
@@ -288,14 +273,18 @@ export default function Home() {
         controllerData ??
         (resetRequested ? null : localData) ??
         cloneSample();
-      setData(initialData);
+      setData(normalizeAppData(initialData));
       setHydrated(true);
     };
     void hydrate();
 
     const onStorage = (event: StorageEvent) => {
       if (event.key === STORAGE_KEY && event.newValue) {
-        setData(JSON.parse(event.newValue) as AppData);
+        try {
+          setData(normalizeAppData(JSON.parse(event.newValue) as AppData));
+        } catch {
+          // Ignore malformed storage events and retain the current inventory.
+        }
       }
     };
     window.addEventListener("storage", onStorage);
@@ -344,7 +333,7 @@ export default function Home() {
         if (!disposed && result.data) {
           setData((current) =>
             result.data!.updatedAt !== current.updatedAt
-              ? result.data!
+              ? normalizeAppData(result.data!)
               : current,
           );
         }
@@ -379,7 +368,9 @@ function AdminScreen({
 }) {
   const [savedPulse, setSavedPulse] = useState(false);
   const [expandedDayRow, setExpandedDayRow] = useState<string | null>(null);
-  const [expiryPromptOpen, setExpiryPromptOpen] = useState(true);
+  const [expiryPromptOpen, setExpiryPromptOpen] = useState(false);
+  const pendingFocusId = useRef<string | null>(null);
+  const movieInputs = useRef(new Map<string, HTMLTextAreaElement>());
   const [displayAction, setDisplayAction] = useState<
     "opening" | "closing" | null
   >(null);
@@ -392,12 +383,11 @@ function AdminScreen({
   } | null>(null);
   const lastIncidentId = useRef<string | null>(null);
   const [now, setNow] = useState(() => new Date());
-  const today = localDateString(now);
   const todayItems = data.items.filter(
     (item) => item.visible && getScheduleState(item, now).active,
   );
   const expiredItems = data.items.filter(
-    (item) => item.endDate && item.endDate < today,
+    (item) => getScheduleState(item, now).reason === "expired",
   );
 
   useEffect(() => {
@@ -453,6 +443,27 @@ function AdminScreen({
     };
   }, []);
 
+  useEffect(() => {
+    const id = pendingFocusId.current;
+    if (!id) return;
+    pendingFocusId.current = null;
+    const input = movieInputs.current.get(id);
+    if (!input) return;
+    input.closest("tr")?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    input.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    input.focus({ preventScroll: true });
+    input.select();
+  }, [data.items]);
+
+  const updateDates = (id: string, dates: { startDate: string; endDate: string }) => {
+    setData((current) => ({
+      ...current,
+      updatedAt: new Date().toISOString(),
+      items: current.items.map((item) => item.id === id ? { ...item, ...dates } : item),
+    }));
+    pulseSaved();
+  };
+
   const updateItem = <K extends keyof GiftItem>(
     id: string,
     key: K,
@@ -488,21 +499,21 @@ function AdminScreen({
   };
 
   const addItem = () => {
-    const today = localDateString();
-    const yearEnd = `${new Date().getFullYear()}-12-31`;
+    const dates = newItemDates();
+    const id = `gift-${crypto.randomUUID()}`;
+    pendingFocusId.current = id;
     setData((current) => ({
       ...current,
       updatedAt: new Date().toISOString(),
       items: [
         ...current.items,
         {
-          id: `gift-${Date.now()}`,
+          id,
           movie: "새 영화",
           format: "전체",
           gift: "경품명을 입력하세요",
           status: "available",
-          startDate: today,
-          endDate: yearEnd,
+          ...dates,
           days: ALL_DAYS,
           visible: true,
         },
@@ -561,7 +572,9 @@ function AdminScreen({
     setData((current) => ({
       ...current,
       updatedAt: new Date().toISOString(),
-      items: current.items.filter((item) => !expiredIds.has(item.id)),
+      items: current.items.filter((item) =>
+        !expiredIds.has(item.id) || getScheduleState(item, new Date()).reason !== "expired",
+      ),
     }));
     setExpiryPromptOpen(false);
   };
@@ -807,6 +820,12 @@ function AdminScreen({
               </div>
             </label>
             <label className="toggle-setting">
+              <span>공지 순환</span>
+              <button type="button" role="switch" aria-checked={data.settings.rotateNotices}
+                aria-label="공지 순환" className={`switch ${data.settings.rotateNotices ? "on" : ""}`}
+                onClick={() => updateSettings("rotateNotices", !data.settings.rotateNotices)}><i /></button>
+            </label>
+            <label className="toggle-setting">
               <span>소진 항목 표시</span>
               <button
                 type="button"
@@ -829,6 +848,10 @@ function AdminScreen({
               <h3>경품 데이터</h3>
             </div>
             <div className="inventory-heading-actions">
+              <button type="button" className="group-movies-button"
+                disabled={!expiredItems.length} onClick={() => setExpiryPromptOpen(true)}>
+                만료 항목 정리 ({expiredItems.length})
+              </button>
               <button
                 type="button"
                 className="group-movies-button"
@@ -864,6 +887,7 @@ function AdminScreen({
                     item.visible && scheduleState.active;
                   const rowClassName = [
                     !item.visible ? "muted-row" : "",
+                    scheduleState.reason === "invalid" ? "invalid-range-row" : "",
                     scheduleState.reason === "expired" ? "expired-row" : "",
                     scheduleState.reason === "offday"
                       ? "schedule-paused-row"
@@ -933,6 +957,11 @@ function AdminScreen({
                     </td>
                     <td>
                       <textarea
+                        ref={(element) => {
+                          if (element) movieInputs.current.set(item.id, element);
+                          else movieInputs.current.delete(item.id);
+                        }}
+                        aria-label={`${item.movie} 영화명`}
                         className="cell-input cell-textarea movie-input"
                         rows={2}
                         value={item.movie}
@@ -990,23 +1019,9 @@ function AdminScreen({
                       </select>
                     </td>
                     <td>
-                      <div className="date-range">
-                        <input
-                          type="date"
-                          value={item.startDate}
-                          onChange={(event) =>
-                            updateItem(item.id, "startDate", event.target.value)
-                          }
-                        />
-                        <span>—</span>
-                        <input
-                          type="date"
-                          value={item.endDate}
-                          onChange={(event) =>
-                            updateItem(item.id, "endDate", event.target.value)
-                          }
-                        />
-                      </div>
+                      <DateRangeEditor dates={item} movie={item.movie}
+                        invalid={scheduleState.reason === "invalid"}
+                        onCommit={(dates) => updateDates(item.id, dates)} />
                     </td>
                     <td>
                       <div
@@ -1086,7 +1101,7 @@ function AdminScreen({
           <div className="panel-heading">
             <div>
               <p className="section-kicker">NOTICE</p>
-              <h3>하단 주의사항</h3>
+              <h3>공지사항</h3>
             </div>
             <button
               className="notice-add-button"
@@ -1139,6 +1154,8 @@ function AdminScreen({
           </div>
         </section>
 
+        <UpdateCheck />
+
         <div className="admin-footer">
           <div className="storage-notice">
             <strong>SQLite 자동 저장</strong>
@@ -1178,8 +1195,8 @@ function AdminScreen({
               유효 기간이 지난 항목이 {expiredItems.length}개 있습니다
             </h2>
             <p className="modal-description">
-              만료된 항목은 전시 화면에 나타나지 않습니다. 관리 목록에서도
-              삭제할까요?
+              만료된 항목은 전시 화면에서만 제외되며 목록에 보관됩니다.
+              아래 항목을 관리 목록에서도 삭제할까요?
             </p>
             <ul>
               {expiredItems.slice(0, 5).map((item) => (
@@ -1275,20 +1292,15 @@ function DisplayScreen({ data }: { data: AppData }) {
   }, []);
 
   const pages = useMemo(() => {
-    const today = localDateString(now);
-    const day = now.getDay();
     const valid = data.items.filter(
-      (item) =>
-        item.visible &&
-        item.startDate <= today &&
-        item.endDate >= today &&
-        item.days.includes(day) &&
+      (item) => item.visible && getScheduleState(item, now).active &&
         (data.settings.showSoldout || item.status !== "soldout"),
     );
-    return paginateGroups(groupItems(valid), 8);
+    return buildDisplayPages(paginateGroups(groupItems(valid), 8), data.settings.notices, data.settings.rotateNotices);
   }, [data, now]);
 
   useEffect(() => {
+    setPageIndex((current) => Math.min(current, pages.length - 1));
     if (pages.length <= 1) return;
     const interval = window.setInterval(
       () => setPageIndex((current) => (current + 1) % pages.length),
@@ -1298,7 +1310,8 @@ function DisplayScreen({ data }: { data: AppData }) {
   }, [pages.length, data.settings.pageSeconds]);
 
   const safePageIndex = Math.min(pageIndex, pages.length - 1);
-  const currentPage = pages[safePageIndex] ?? [];
+  const selectedPage = pages[safePageIndex];
+  const currentPage = selectedPage.kind === "gifts" ? selectedPage.groups : [];
   const currentRowCount = currentPage.reduce(
     (total, group) => total + group.items.length,
     0,
@@ -1318,7 +1331,7 @@ function DisplayScreen({ data }: { data: AppData }) {
   return (
     <main className="display-viewport">
       <div
-        className="display-canvas"
+        className={`display-canvas ${data.settings.rotateNotices ? "rotating-notices" : ""}`}
         style={{
           transform: `translate(-50%, -50%) scale(${scale})`,
           width: 1280,
@@ -1342,11 +1355,18 @@ function DisplayScreen({ data }: { data: AppData }) {
 
         <section className="display-title">
           <p>CGV {data.settings.location}</p>
-          <h1>{data.settings.title}</h1>
+          <h1>{selectedPage.kind === "notices" ? "공지사항" : data.settings.title}</h1>
           <span className="title-rule" />
         </section>
 
-        <section className="display-table-wrap">
+        {selectedPage.kind === "notices" ? (
+          <section className="notice-page" aria-label="공지사항">
+            <ul>{selectedPage.notices.map((notice, index) => <li key={index}>
+              <span className="notice-number">{String(notice.number).padStart(2, "0")}{notice.continued && <small>계속</small>}</span>
+              <p>{notice.lines.map((line, lineIndex) => <span key={lineIndex}>{line || "\u00a0"}</span>)}</p>
+            </li>)}</ul>
+          </section>
+        ) : <section className="display-table-wrap">
           {currentPage.length ? (
             <table className={`display-table ${tableDensity}`}>
               <thead>
@@ -1394,9 +1414,9 @@ function DisplayScreen({ data }: { data: AppData }) {
               <p>새로운 경품이 준비되는 대로 안내해 드리겠습니다.</p>
             </div>
           )}
-        </section>
+        </section>}
 
-        <footer
+        {!data.settings.rotateNotices && <footer
           className={`display-footer ${
             data.settings.notices.length > 3 ? "dense" : ""
           }`}
@@ -1410,7 +1430,7 @@ function DisplayScreen({ data }: { data: AppData }) {
               <li key={index}>{notice}</li>
             ))}
           </ul>
-        </footer>
+        </footer>}
 
         {pages.length > 1 && (
           <div className="page-indicator">
