@@ -1,6 +1,6 @@
 {
   "name": "cgv-guro-gift-display",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "packageManager": "npm@10.9.2",
   "engines": {
@@ -9,16 +9,18 @@
   "scripts": {
     "dev": "vite --config vite.server.config.ts",
     "build": "npm run server:build",
-    "test": "npm run server:check && node --test tests/item-order.test.mjs tests/server-transition.test.mjs",
+    "test": "npm run server:check && node --test tests/*.test.mjs && npm run test:browser",
     "lint": "tsc --noEmit -p tsconfig.server.json",
     "server:build": "vite build --config vite.server.config.ts",
-    "server:check": "tsc --noEmit -p tsconfig.server.json && npm run server:build"
+    "server:check": "tsc --noEmit -p tsconfig.server.json && npm run server:build",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

@@ -36,6 +36,9 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must match package.json version v$version."
+          }
           $packageDirectory = Join-Path $env:RUNNER_TEMP "cgv-guro-gift-display"
           New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $packageDirectory "scripts") -Force | Out-Null
@@ -166,6 +169,10 @@ jobs:
             if ($stored.data.settings.location -ne $koreanLocation) {
               throw "SQLite round trip failed."
             }
+            $upgraded = $payload | ConvertFrom-Json
+            $upgraded.settings | Add-Member -NotePropertyName rotateNotices -NotePropertyValue $true
+            $postArguments.Body = $upgraded | ConvertTo-Json -Depth 5
+            Invoke-RestMethod @postArguments
             $database = Join-Path $runtimeRoot "CGVGiftDisplay\inventory.db"
             $bytes = [IO.File]::ReadAllBytes($database)
             $expectedHeader = "SQLite format 3" + [char]0
@@ -183,6 +190,9 @@ jobs:
             $stored = Invoke-RestMethod "http://127.0.0.1:3210/data"
             if ($stored.data.updatedAt -ne "2026-08-13T00:00:00.000Z") {
               throw "Data did not survive restart."
+            }
+            if ($stored.data.settings.rotateNotices -ne $true) {
+              throw "New display setting did not survive SQLite restart."
             }
             "### Runtime verification" >> $env:GITHUB_STEP_SUMMARY
             "- First ready: **$($first.ReadyMs) ms** / 3000 ms" >> $env:GITHUB_STEP_SUMMARY
