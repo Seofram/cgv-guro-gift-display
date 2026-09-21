@@ -45,16 +45,22 @@ are disabled for reduced-motion preferences.
 
 ## Release checks and deferred installation
 
-The admin footer displays the build's `package.json` version. `업데이트 확인`
-makes a manual, unauthenticated request to the repository's latest stable GitHub
-Release. Strict semantic-version comparison handles numeric prereleases and ignores
+The next release is 1.5.0, aligned across package.json, package-lock.json, and the
+PowerShell runtime health response. The release workflow reads this version rather
+than incrementing it, and rejects a release tag that does not match it.
+
+The admin footer displays the build's `package.json` version. Admin startup makes
+one background, unauthenticated request to the repository's latest stable GitHub
+Release; `업데이트 확인` retries or refreshes it manually. Display startup does not
+check releases. Strict semantic-version comparison handles numeric prereleases and ignores
 build metadata. Checks abort after 3.5 seconds or component unmount. Offline,
-rate-limit, missing-release, malformed-response, and server errors only change the
-local status text; they never block inventory, SQLite, or the display controller.
+rate-limit, missing-release, malformed-response, and server errors stay silent and
+retain any previously found release; they never block inventory, SQLite, or the
+display controller. StrictMode effect replay does not send duplicate startup checks.
 
 The GitHub REST API supports browser CORS, so this request stays out of the
 single-threaded PowerShell TCP server. No browser token, download, installation,
-startup check, or automatic update was introduced. Links stay within this repository's
+or automatic update was introduced. Links stay within this repository's
 Releases pages. See [GitHub's CORS documentation](https://docs.github.com/en/rest/using-the-rest-api/using-cors-and-jsonp-to-make-cross-origin-requests).
 
 The current ZIP launcher has no atomic replacement or rollback protocol. A future

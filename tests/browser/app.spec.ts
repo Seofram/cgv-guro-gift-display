@@ -1,6 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
 
 const STORAGE_KEY = "cgv-guro-gift-display-v1";
+test.beforeEach(async ({ page }) => {
+  // Never depend on the public API in unrelated inventory/browser regressions.
+  await page.route("https://api.github.com/**", (route) => route.abort());
+});
 const item = (id = "one", movie = "영화 A") => ({
   id, movie, format: "전체", gift: `경품 ${id}`, status: "available",
   startDate: "2026-09-01", endDate: "2026-09-30", days: [0,1,2,3,4,5,6], visible: true,
@@ -220,18 +224,65 @@ test("legacy localStorage fallback and active drafts survive unrelated synchroni
 });
 
 for (const [response, status] of [
-  [{ tag_name: "v1.5.0" }, "업데이트 가능 · v1.5.0"],
-  [{ tag_name: "v1.4.1" }, "최신 버전입니다"],
-  [{}, "업데이트를 확인할 수 없습니다"],
-  [null, "업데이트를 확인할 수 없습니다"],
+  [{ tag_name: "v1.6.0" }, "업데이트 가능 · v1.6.0"],
+  [{ tag_name: "v1.5.0" }, "최신 버전입니다"],
+  [{}, null],
+  [null, null],
 ] as const) {
   test(`release check ${status} leaves inventory functional (${JSON.stringify(response)})`, async ({ page }) => {
-    await page.route("https://api.github.com/**", (route) => response === null ? route.abort() : route.fulfill({ json: response }));
+    let checks = 0;
+    await page.route("https://api.github.com/**", (route) => {
+      checks++;
+      return response === null ? route.abort() : route.fulfill({ json: response });
+    });
     await boot(page);
-    await expect(page.locator(".update-check")).toContainText("현재 버전 1.4.1");
-    await page.getByRole("button", { name: "업데이트 확인", exact: true }).click();
-    await expect(page.locator(".update-check")).toContainText(status);
+    await expect(page.locator(".update-check")).toContainText("현재 버전 1.5.0");
+    const retry = page.getByRole("button", { name: "업데이트 확인", exact: true });
+    await expect(retry).toBeEnabled();
+    expect(checks).toBe(1);
+    if (status) await expect(page.locator(".update-check")).toContainText(status);
+    else await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
     await page.getByRole("button", { name: "+ 항목 추가", exact: true }).click();
     await expect(page.locator(".movie-input")).toHaveCount(2);
+    expect(checks).toBe(1);
+    await retry.click();
+    await expect(retry).toBeEnabled();
+    expect(checks).toBe(2);
   });
 }
+
+test("automatic failure is silent and manual refresh discovers a release", async ({ page }) => {
+  let checks = 0;
+  await page.route("https://api.github.com/**", (route) => {
+    checks++;
+    return checks === 1 ? route.fulfill({ status: 429, json: {} }) :
+      route.fulfill({ json: { tag_name: "v1.6.0" } });
+  });
+  await boot(page);
+  const retry = page.getByRole("button", { name: "업데이트 확인", exact: true });
+  await expect(retry).toBeEnabled();
+  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
+  await retry.click();
+  await expect(page.locator(".update-check")).toContainText("업데이트 가능 · v1.6.0");
+  expect(checks).toBe(2);
+});
+
+test("pending startup check does not block inventory and times out silently", async ({ page }) => {
+  await page.route("https://api.github.com/**", () => {});
+  await boot(page);
+  await expect(page.getByRole("button", { name: "업데이트 확인 중…" })).toBeDisabled();
+  await page.getByRole("button", { name: "+ 항목 추가", exact: true }).click();
+  await expect(page.locator(".movie-input")).toHaveCount(2);
+  await page.clock.fastForward(3500);
+  await expect(page.getByRole("button", { name: "업데이트 확인", exact: true })).toBeEnabled();
+  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
+});
+
+test("display startup never checks releases", async ({ page }) => {
+  let checks = 0;
+  await page.route("https://api.github.com/**", (route) => { checks++; return route.abort(); });
+  await boot(page, fixture(), true);
+  await page.clock.fastForward(30000);
+  await expect(page.locator(".display-table")).toBeVisible();
+  expect(checks).toBe(0);
+});

@@ -36,6 +36,9 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must match package.json version v$version."
+          }
           $packageDirectory = Join-Path $env:RUNNER_TEMP "cgv-guro-gift-display"
           New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $packageDirectory "scripts") -Force | Out-Null

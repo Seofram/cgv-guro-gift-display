@@ -17,7 +17,11 @@ test("uses a PowerShell server without unsigned executables or Node", async () =
     ]);
 
   const packageJson = JSON.parse(packageSource);
-  assert.equal(packageJson.version, "1.4.1");
+  assert.equal(packageJson.version, "1.5.0");
+  const lock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
+  assert.equal(lock.version, packageJson.version);
+  assert.equal(lock.packages[""].version, packageJson.version);
+  assert.ok(serverSource.includes(`$script:Version = "${packageJson.version}"`));
   assert.equal(packageJson.dependencies["@tauri-apps/api"], undefined);
   assert.equal(packageJson.dependencies.next, undefined);
   assert.equal(packageJson.devDependencies["@tauri-apps/cli"], undefined);

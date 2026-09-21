@@ -2,7 +2,7 @@ param([switch]$NoOpen)
 
 $ErrorActionPreference = "Stop"
 $script:StartedAt = [Diagnostics.Stopwatch]::StartNew()
-$script:Version = "1.4.1"
+$script:Version = "1.5.0"
 $script:WebRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "web"
 $script:RuntimeDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
 $script:DatabasePath = Join-Path $script:RuntimeDirectory "inventory.db"
