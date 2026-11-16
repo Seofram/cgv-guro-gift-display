@@ -29,7 +29,8 @@ Release or production installation change is part of this work.
 - `npm run lint`: passed.
 - `npm test`: passed; type check/build, **27 Node tests**, **49 Microsoft Edge browser tests**.
 - Fresh packaged installation on **Windows PowerShell 5.1**:
-  `tests/windows/verify-runtime.ps1` passed **76 runtime assertions**, including
+  `tests/windows/verify-runtime.ps1` includes **77 runtime assertions** and
+  **28 focused backup protocol checks**, including
   four real Edge/PowerShell scenarios: overlapping administrators, delayed
   acknowledgment, process kill/restart while editing, and HTTP 409 during retry.
 - Packaged scripts parse with UTF-8 BOMs. Package is approximately **3.34 MiB**,
@@ -83,3 +84,19 @@ format, kiosk identity or polling changes. Existing v1.5.0 data is still read
 without rewriting SQLite; values over the new write limits require explicit
 correction before a later document can be saved. With an old backup-error log and
 no state marker, the warning stays conservative until a new verified backup.
+
+## Final backup-state follow-up after re-review of `faa8de4`
+
+This change is confined to backup-state handling and focused Windows tests;
+frontend state, polling, kiosk heartbeat, CAS, validation and undo are unchanged.
+
+| Finding | Correction | Targeted evidence |
+| --- | --- | --- |
+| Interrupted transitions can conceal a later unresolved attempt | Flush a pending fence before backup work, preserve it through all failure paths, inspect pending/temporary metadata at startup, and remove the fence only after a verified snapshot and durable success commit. Old success alone never establishes health: otherwise-healthy startup verifies a fresh current snapshot under the same fence. | Actual worker interruption after durable temporary failure creation; marker replacement failure; simultaneous result-recording/log failures; failure to persist any pending evidence; partial metadata; inventory/revision unchanged throughout. |
+| Successful snapshot plus failed status write cannot recover while today's file exists | Unresolved status triggers a verified current recovery snapshot and new metadata commit even with an existing daily backup. Promote verified candidates atomically; keep the original daily snapshot and fourteen-day retention unchanged. | Lock the success marker so snapshot succeeds and status replacement fails; release storage and retry without deleting today's file; warning clears only after verified recovery and remains clear after startup revalidation; daily backup remains byte-identical. |
+
+Filesystem limitation: if every filesystem mutation fails, historical evidence
+cannot be persisted. The process warns and refuses snapshot mutation, and the
+next startup requires fresh fenced verification before reporting health. Flushes
+and atomic replacement depend on filesystem/hardware guarantees. See the detailed
+protocol in `data-integrity.md`. No database schema or version change is needed.

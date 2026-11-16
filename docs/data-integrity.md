@@ -129,12 +129,46 @@ is switched to rollback-journal mode (one self-contained file), checked with
 kept. A new store also receives a verified backup after its first save. A daily
 backup problem never blocks saving, but is returned as `backupOk: false`, exposed
 through `/display/status`, logged in `backup-error.log`, and shown in Korean on
-the administrator screen. `backup-state.json` atomically records unresolved
-failure or verified success and is restored on startup. Restarting or finding an
-older backup cannot clear the warning. Missing metadata with an existing error
-log, corrupt metadata, or unreadable metadata produces a conservative warning.
-The error log is a fallback when a marker write fails. Only a later successfully
-created and verified backup with its success state recorded clears the warning.
+the administrator screen. Backup state uses the following transition protocol:
+
+1. Before creating a snapshot or changing a backup destination, create
+   `backup-state.pending` and flush it to disk using `WriteThrough` and
+   `Flush(true)`. Failure to persist this fence aborts backup work and reports
+   an unresolved status.
+2. Create a candidate through the unchanged SQLite online backup API and its
+   integrity verification. Verify that its payload and revision match the
+   current source record, then atomically promote it to the destination. Any
+   known-good destination stays intact until the replacement is verified.
+3. Flush `backup-state.json.tmp`, atomically replace `backup-state.json` with
+   verified success, and remove the pending fence **last**. Failed operations
+   leave the fence in place even if failure-state recording and logging fail.
+
+Startup treats any pending fence or temporary state file (including partial,
+empty, corrupt or inaccessible metadata) as unresolved, even if an older marker
+says success. Missing state for existing inventory, malformed state, and legacy
+error-log evidence also retain a warning. Logging is auxiliary, not the sole
+durable status source.
+
+When state is unresolved, a subsequent save does not skip recovery just because
+today's daily file exists. It creates a current verified snapshot in
+`backups\current-recovery.db` and commits the state protocol again. The original
+daily pre-change snapshot is preserved. This single recovery file is outside the
+fourteen-daily-file retention pattern and is replaced only by a verified candidate.
+An interrupted candidate may remain for diagnosis; its presence does not replace
+the pending fence or authorize a healthy state.
+
+If **all** filesystem mutations fail, no implementation can leave durable proof
+that an attempt occurred. In that case this process reports the failure and does
+not mutate snapshots. To avoid trusting an old successful marker after restart,
+every otherwise-healthy startup with inventory establishes fresh fenced evidence
+by creating and verifying a current recovery snapshot and recording success.
+Unresolved durable evidence remains a warning until an explicit subsequent backup
+operation succeeds. If storage is still unwritable, startup stays conservative;
+if storage has recovered, health requires actual successful snapshot verification
+and metadata commit, not merely a restart. Lost historical failure details cannot
+be reconstructed when no write succeeded. Process-interruption guarantees assume
+the filesystem/hardware honors acknowledged flushes and atomic replacement; they
+do not guarantee survival of hardware failure or external deletion of all evidence.
 
 `reset-data.bat` stops the server and creates a separate current
 `backups\pre-reset-<timestamp>.db` through the same online backup API. It verifies
@@ -173,6 +207,11 @@ edits. The restore procedure is in `README_사용법.md`.
   `verify-browser.mjs` for real Edge administrators, delayed acknowledgments,
   server process kill/restart and retry conflicts, and verifies fail-closed reset
   and restoration of its final backup. It is run by the Windows workflow.
+- `tests/windows/verify-backup-state.ps1`: focused faults against the actual
+  packaged backup functions and SQLite store, including a killed worker between
+  temporary failure-state creation and replacement, Windows sharing violations,
+  simultaneous state/log failures, impossible pending writes, and recovery with
+  an existing daily file. Invoked by the Windows runtime suite.
 
       npm run build
       # assemble the package as the workflow does, then:

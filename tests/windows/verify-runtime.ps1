@@ -399,6 +399,11 @@ try {
     ($beforeReset.data | ConvertTo-Json -Depth 10 -Compress)) "the actual server serves the complete pre-reset document after restoration"
 } finally { Stop-TestServer $restoredServer }
 
+$backupChecks = & (Join-Path $PSScriptRoot "verify-backup-state.ps1") `
+  -PackageDirectory $PackageDirectory -RuntimeRoot (Join-Path $RuntimeRoot "backup-protocol")
+Assert-That ($backupChecks -gt 0) "focused crash-consistent backup protocol fault injections pass"
+$result.BackupProtocolChecks = $backupChecks
+
 Write-Host ""
 Write-Host "$($checks.Count) runtime checks passed."
 $result.Checks = $checks.Count

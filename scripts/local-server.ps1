@@ -42,6 +42,8 @@ $script:BackupDirectory = Join-Path $script:RuntimeDirectory "backups"
 $script:BackupRetentionDays = 14
 $script:BackupErrorLog = Join-Path $script:RuntimeDirectory "backup-error.log"
 $script:BackupStateFile = Join-Path $script:RuntimeDirectory "backup-state.json"
+$script:BackupPendingFile = Join-Path $script:RuntimeDirectory "backup-state.pending"
+$script:BackupRecoveryFile = Join-Path $script:BackupDirectory "current-recovery.db"
 $script:BackupError = $null
 $script:LastBackupAt = $null
 $script:DisplayTokenFile = Join-Path $script:RuntimeDirectory "display-token.txt"
@@ -482,6 +484,19 @@ function Get-AppDataProblem {
   return $null
 }
 
+function Write-DurableBackupText {
+  param([string]$Path, [string]$Text)
+  $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+  $file = New-Object IO.FileStream -ArgumentList @(
+    $Path, [IO.FileMode]::Create, [IO.FileAccess]::Write,
+    [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough
+  )
+  try {
+    $file.Write($bytes, 0, $bytes.Length)
+    $file.Flush($true)
+  } finally { $file.Dispose() }
+}
+
 function Write-BackupState {
   # Atomic replacement in the runtime directory. The marker records both
   # failure and verified success, so historical error logs are unambiguous.
@@ -491,7 +506,7 @@ function Write-BackupState {
     at = [DateTime]::UtcNow.ToString("o")
     error = $script:BackupError
   } | ConvertTo-Json -Depth 4 -Compress
-  [IO.File]::WriteAllText($temporary, $state, (New-Object Text.UTF8Encoding($false)))
+  Write-DurableBackupText -Path $temporary -Text $state
   if (Test-Path -LiteralPath $script:BackupStateFile) {
     # PS 5.1 converts an ordinary $null string argument to an empty path.
     [IO.File]::Replace($temporary, $script:BackupStateFile, [NullString]::Value)
@@ -501,11 +516,21 @@ function Write-BackupState {
 }
 
 function Read-BackupState {
+  $script:BackupError = $null
   try {
+    # Presence alone is sufficient: even an empty/partial/inaccessible file is
+    # evidence of an incomplete transition, regardless of the old marker.
+    if (
+      (Test-Path -LiteralPath $script:BackupPendingFile) -or
+      (Test-Path -LiteralPath ($script:BackupStateFile + ".tmp"))
+    ) { throw "unfinished backup transition" }
     if (-not (Test-Path -LiteralPath $script:BackupStateFile)) {
       # An older build may have recorded a failure only in the log. Retain a
       # conservative warning until this build creates a verified backup.
-      if (Test-Path -LiteralPath $script:BackupErrorLog) { throw "unresolved legacy log" }
+      if (
+        (Test-Path -LiteralPath $script:BackupErrorLog) -or
+        $null -ne (Read-CgvRecord -DatabasePath $script:DatabasePath)
+      ) { throw "missing backup state" }
       return
     }
     $state = ConvertFrom-Json ([IO.File]::ReadAllText($script:BackupStateFile))
@@ -537,7 +562,7 @@ function Write-BackupFailure {
     at = (Get-Date).ToUniversalTime().ToString("o")
   }
   try { Write-BackupState } catch {
-    # The existing error log is a durable fallback if the marker is unwritable.
+    # The pending fence is left in place even if both metadata and logging fail.
   }
   try {
     [IO.File]::AppendAllText(
@@ -552,14 +577,34 @@ function Write-BackupFailure {
 
 function Save-Snapshot {
   param([Parameter(Mandatory = $true)][string]$BackupPath)
+  $script:BackupError = @{
+    message = "백업 완료 여부를 아직 확인하지 못했습니다. 새 백업을 확인할 때까지 경고를 유지합니다."
+    at = [DateTime]::UtcNow.ToString("o")
+  }
+  # No SQLite backup or destination mutation is allowed until this fence is
+  # durable. It is removed LAST, only after verified snapshot + healthy state.
+  Write-DurableBackupText -Path $script:BackupPendingFile -Text $script:BackupError.at
   New-Item -ItemType Directory -Path $script:BackupDirectory -Force | Out-Null
+  $current = Read-CgvRecord -DatabasePath $script:DatabasePath
+  $candidate = $BackupPath + ".next"
   # A verified single-file SQLite snapshot taken with the online backup
-  # API, so it is consistent even while the write-ahead log holds data.
-  Backup-CgvData -DatabasePath $script:DatabasePath -Destination $BackupPath
+  # API. Keep any known-good destination until the candidate is verified.
+  Backup-CgvData -DatabasePath $script:DatabasePath -Destination $candidate
+  $copy = [CgvSqliteStore]::ReadSnapshot($candidate)
+  if (
+    $null -eq $current -or $null -eq $copy -or
+    $copy.Revision -ne $current.Revision -or $copy.Payload -cne $current.Payload
+  ) { throw "최신 데이터가 백업에 반영되었는지 확인하지 못했습니다." }
+  if (Test-Path -LiteralPath $BackupPath) {
+    [IO.File]::Replace($candidate, $BackupPath, [NullString]::Value)
+  } else {
+    [IO.File]::Move($candidate, $BackupPath)
+  }
   $script:BackupError = $null
   # A failure to record verified success keeps the warning active. Merely
   # restarting or finding an older backup must never clear an unresolved error.
   Write-BackupState
+  Remove-Item -LiteralPath $script:BackupPendingFile -Force -ErrorAction Stop
   $script:LastBackupAt = (Get-Date).ToUniversalTime().ToString("o")
   Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "inventory-*.db" |
     Sort-Object Name -Descending |
@@ -576,7 +621,12 @@ function Save-DailyBackup {
     $backupPath = Join-Path $script:BackupDirectory (
       "inventory-" + (Get-Date).ToString("yyyyMMdd") + ".db"
     )
-    if (Test-Path -LiteralPath $backupPath -PathType Leaf) { return }
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+      if ($null -eq $script:BackupError) { return }
+      # Preserve today's original pre-change snapshot. Recovery uses a separate
+      # fixed file, outside the fourteen daily-backup retention pattern.
+      $backupPath = $script:BackupRecoveryFile
+    }
     if ($null -eq (Read-CgvRecord -DatabasePath $script:DatabasePath)) { return }
     Save-Snapshot -BackupPath $backupPath
   } catch {
@@ -600,6 +650,18 @@ function Save-FirstBackup {
     ))
   } catch {
     Write-BackupFailure $_.Exception.Message
+  }
+}
+
+function Initialize-BackupStatus {
+  Read-BackupState
+  if ($null -eq $script:BackupError -and
+      $null -ne (Read-CgvRecord -DatabasePath $script:DatabasePath)) {
+    # If ALL filesystem mutations failed, no later reader can know an attempt
+    # occurred. Never trust old success alone: establish fresh fenced evidence
+    # on each healthy startup. Unresolved durable evidence stays a warning.
+    try { Save-Snapshot -BackupPath $script:BackupRecoveryFile }
+    catch { Write-BackupFailure $_.Exception.Message }
   }
 }
 
@@ -835,8 +897,8 @@ try {
     throw "웹 화면 파일을 찾을 수 없습니다: $script:WebRoot"
   }
   New-Item -ItemType Directory -Path $script:RuntimeDirectory -Force | Out-Null
-  Read-BackupState
   Initialize-CgvDataStore -DatabasePath $script:DatabasePath
+  Initialize-BackupStatus
   if (Test-Path -LiteralPath $script:BackupDirectory -PathType Container) {
     $latestBackup = Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "*.db" |
       Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
