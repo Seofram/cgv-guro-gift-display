@@ -38,7 +38,7 @@ if ((Split-Path $runtimeDirectory -Leaf) -ne "CGVGiftDisplay") {
 
 Write-Host ""
 Write-Host "다음 항목을 제거합니다."
-Write-Host "- 영화, 경품, 재고, 주의사항 데이터"
+Write-Host "- 영화, 경품, 재고, 주의사항 데이터와 일일 백업(backups 폴더)"
 Write-Host "- 전시 제어 로그와 실행 상태"
 Write-Host "- CGV 전용 Edge/Chrome 프로필"
 Write-Host ""

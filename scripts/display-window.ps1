@@ -245,7 +245,8 @@ $existingBrowserHandles = @(
 $arguments = @(
   "--kiosk",
   "http://127.0.0.1:3210/?view=display",
-  "--user-data-dir=$($browser.DisplayProfileDirectory)",
+  # Quoted explicitly: Windows PowerShell 5.1 does not quote arguments.
+  ('--user-data-dir="' + $browser.DisplayProfileDirectory + '"'),
   "--no-first-run",
   "--disable-session-crashed-bubble",
   "--window-position=$($bounds.X),$($bounds.Y)",

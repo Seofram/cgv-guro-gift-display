@@ -15,6 +15,29 @@ function Stop-CgvServer {
     }
   }
 
+  # Stop supervisors first; otherwise they would start the server again.
+  $serverProcesses = @(
+    Get-CimInstance Win32_Process -Filter (
+      "Name = 'powershell.exe' OR Name = 'pwsh.exe'"
+    ) -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine.IndexOf(
+          "local-server.ps1",
+          [StringComparison]::OrdinalIgnoreCase
+        ) -ge 0
+      }
+  )
+  foreach ($serverProcess in $serverProcesses) {
+    if ($serverProcess.CommandLine.IndexOf(
+      "-Supervise",
+      [StringComparison]::OrdinalIgnoreCase
+    ) -ge 0) {
+      Stop-Process -Id $serverProcess.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  }
+  $candidateIds += @($serverProcesses | ForEach-Object { [int]$_.ProcessId })
+
   $connections = @(
     Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue
   )

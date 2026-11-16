@@ -5,7 +5,8 @@ $runtimeDirectory = Join-Path $env:LOCALAPPDATA "CGVGiftDisplay"
 
 Write-Host ""
 Write-Host "CGV 경품 안내의 영화, 경품, 재고, 주의사항 데이터를 모두 제거합니다."
-Write-Host "제거된 데이터는 복구할 수 없습니다."
+Write-Host "초기화 전의 데이터는 backups 폴더의 일일 백업으로만 복구할 수 있습니다."
+Write-Host "(백업 폴더는 지우지 않습니다: %LOCALAPPDATA%\CGVGiftDisplay\backups)"
 $confirmation = Read-Host "계속하려면 '초기화'를 입력하세요"
 
 if ($confirmation -ne "초기화") {
