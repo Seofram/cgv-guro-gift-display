@@ -18,9 +18,13 @@ const fixture = (count = 1, rotateNotices = false, notices = ["공지 내용을 
 async function boot(page: Page, data = fixture(), display = false) {
   await page.clock.install({ time: new Date("2026-09-21T12:00:00+09:00") });
   await page.clock.pauseAt(new Date("2026-09-21T12:00:01+09:00"));
+  let revision = 1000;
   await page.route("**/data", async (route) => {
-    if (route.request().method() === "POST") data = route.request().postDataJSON();
-    await route.fulfill({ json: { ok: true, data } });
+    if (route.request().method() === "POST") {
+      data = route.request().postDataJSON();
+      revision++;
+    }
+    await route.fulfill({ json: { ok: true, data, revision } });
   });
   await page.route("**/display/status", (route) => route.fulfill({ json: { running: false, expected: false, abnormal: false } }));
   await page.goto(display ? "/?view=display" : "/");
@@ -88,7 +92,7 @@ test("add focuses and reveals movie field; hydration and remote updates do not s
     window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) }));
   }, { key: STORAGE_KEY, remote: { ...saved(), items: [...saved().items, item("remote")] } });
   await expect(page.getByLabel("지점명", { exact: true })).toBeFocused();
-  await expect(page.locator(".movie-input")).toHaveCount(14);
+  await expect(page.locator(".movie-input")).toHaveCount(13);
 });
 
 test("manual ordering, stable trimmed grouping, cursor and responsive day-picker layout remain intact", async ({ page }) => {
@@ -155,7 +159,7 @@ test("sold-out, hidden and scheduled items retain their visibility rules", async
   await expect(page.locator(".display-table tbody tr")).toHaveCount(1);
   data.settings.showSoldout = true;
   data.updatedAt = "2026-09-21T01:00:00.000Z";
-  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data } }));
+  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data, revision: 2000 } }));
   await page.clock.fastForward(1000);
   await expect(page.locator(".display-table tbody tr")).toHaveCount(2);
 });
@@ -188,7 +192,7 @@ test("sync clamps page count and changing cadence cleans up the old timer", asyn
   const remote = fixture(1, true);
   remote.updatedAt = "new-revision";
   remote.settings.pageSeconds = 3;
-  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data: remote } }));
+  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data: remote, revision: 2000 } }));
   await page.clock.fastForward(1000);
   await expect(page.locator(".page-indicator i")).toHaveCount(2);
   await expect(page.locator(".page-indicator i").nth(1)).toHaveClass("active");
@@ -204,7 +208,18 @@ test("legacy localStorage fallback and active drafts survive unrelated synchroni
   const data = fixture();
   delete (data.settings as Partial<typeof data.settings>).rotateNotices;
   await page.addInitScript(({ data, key }) => localStorage.setItem(key, JSON.stringify(data)), { data, key: STORAGE_KEY });
-  await page.route("**/data", (route) => route.abort());
+  // An empty store (404) is the only case where the local copy may seed SQLite;
+  // an unreadable store is covered by the failed-read regression below.
+  let stored: ReturnType<typeof fixture> | null = null;
+  let revision = 0;
+  await page.route("**/data", (route) => {
+    if (route.request().method() === "POST") {
+      stored = route.request().postDataJSON(); revision++;
+      return route.fulfill({ json: { ok: true, revision } });
+    }
+    return stored ? route.fulfill({ json: { ok: true, data: stored, revision } })
+      : route.fulfill({ status: 404, json: { ok: false, reset: false } });
+  });
   await page.route("**/display/status", (route) => route.fulfill({ json: { running: false } }));
   await page.goto("/");
   await expect(page.getByRole("switch", { name: "공지 순환" })).toHaveAttribute("aria-checked", "false");
@@ -217,14 +232,14 @@ test("legacy localStorage fallback and active drafts survive unrelated synchroni
   await expect(start).toHaveValue("2026-10-01");
   await page.getByLabel("영화 0 종료일").fill("2026-10-08");
   await page.getByRole("heading", { name: "경품 데이터" }).click();
-  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), STORAGE_KEY);
-  expect(stored.items[0].startDate).toBe("2026-10-01");
-  expect(stored.items[0].gift).toBe("원격 변경");
+  await expect.poll(() => stored?.items[0].startDate).toBe("2026-10-01");
+  expect(stored!.items[0].gift).toBe(data.items[0].gift);
   await page.screenshot({ path: "test-results/admin.png", fullPage: true });
 });
 
 for (const [response, status] of [
   [{ tag_name: "v1.6.0" }, "업데이트 가능 · v1.6.0"],
+  [{ tag_name: "v1.5.1" }, "최신 버전입니다"],
   [{ tag_name: "v1.5.0" }, "최신 버전입니다"],
   [{}, null],
   [null, null],
@@ -236,12 +251,12 @@ for (const [response, status] of [
       return response === null ? route.abort() : route.fulfill({ json: response });
     });
     await boot(page);
-    await expect(page.locator(".update-check")).toContainText("현재 버전 1.5.0");
+    await expect(page.locator(".update-check")).toContainText("현재 버전 1.5.1");
     const retry = page.getByRole("button", { name: "업데이트 확인", exact: true });
     await expect(retry).toBeEnabled();
     expect(checks).toBe(1);
     if (status) await expect(page.locator(".update-check")).toContainText(status);
-    else await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
+    else await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.1업데이트 확인");
     await page.getByRole("button", { name: "+ 항목 추가", exact: true }).click();
     await expect(page.locator(".movie-input")).toHaveCount(2);
     expect(checks).toBe(1);
@@ -261,7 +276,7 @@ test("automatic failure is silent and manual refresh discovers a release", async
   await boot(page);
   const retry = page.getByRole("button", { name: "업데이트 확인", exact: true });
   await expect(retry).toBeEnabled();
-  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
+  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.1업데이트 확인");
   await retry.click();
   await expect(page.locator(".update-check")).toContainText("업데이트 가능 · v1.6.0");
   expect(checks).toBe(2);
@@ -275,7 +290,7 @@ test("pending startup check does not block inventory and times out silently", as
   await expect(page.locator(".movie-input")).toHaveCount(2);
   await page.clock.fastForward(3500);
   await expect(page.getByRole("button", { name: "업데이트 확인", exact: true })).toBeEnabled();
-  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.0업데이트 확인");
+  await expect(page.locator(".update-check")).toHaveText("현재 버전 1.5.1업데이트 확인");
 });
 
 test("display startup never checks releases", async ({ page }) => {
@@ -285,4 +300,716 @@ test("display startup never checks releases", async ({ page }) => {
   await page.clock.fastForward(30000);
   await expect(page.locator(".display-table")).toBeVisible();
   expect(checks).toBe(0);
+});
+
+async function installClock(page: Page) {
+  await page.clock.install({ time: new Date("2026-09-21T12:00:00+09:00") });
+  await page.clock.pauseAt(new Date("2026-09-21T12:00:01+09:00"));
+  await page.route("**/display/status", (route) => route.fulfill({ json: { running: false, expected: false, abnormal: false } }));
+}
+
+test("a failed inventory read never saves fallback data and recovers on retry", async ({ page }) => {
+  await installClock(page);
+  let failing = true;
+  let posts = 0;
+  await page.route("**/data", (route) => {
+    if (route.request().method() === "POST") { posts++; return route.fulfill({ json: { ok: true } }); }
+    return failing
+      ? route.fulfill({ status: 500, json: { ok: false, message: "database is locked" } })
+      : route.fulfill({ json: { ok: true, data: fixture() } });
+  });
+  await page.goto("/");
+  await expect(page.locator(".boot-screen")).toContainText("데이터를 불러오지 못했습니다");
+  await expect(page.locator(".movie-input")).toHaveCount(0);
+  expect(posts).toBe(0);
+  failing = false;
+  await page.clock.fastForward(2000);
+  await expect(page.locator(".movie-input")).toHaveCount(1);
+  await expect(page.locator(".movie-input")).toHaveValue("영화 0");
+  // Freshly loaded inventory is not written back to the store.
+  expect(posts).toBe(0);
+});
+
+test("save failures are visible, retried, and unsaved edits survive a restart", async ({ page }) => {
+  await installClock(page);
+  let online = true;
+  let stored = fixture();
+  let revision = 1000;
+  await page.route("**/data", (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { ok: true, data: stored, revision } });
+    if (!online) return route.abort();
+    stored = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, revision: ++revision } });
+  });
+  await page.goto("/");
+  await expect(page.locator(".save-state")).toHaveText("자동 저장");
+  online = false;
+  await page.getByLabel("지점명", { exact: true }).fill("오프라인 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  expect(stored.settings.location).toBe("구로");
+  // The controller returns with its older copy: the unsaved edit wins and is stored.
+  online = true;
+  await page.reload();
+  await expect(page.getByLabel("지점명", { exact: true })).toHaveValue("오프라인 수정");
+  await expect.poll(() => stored.settings.location).toBe("오프라인 수정");
+  await expect(page.locator(".save-state")).not.toHaveText("저장 실패 · 재시도 중");
+  // Without a restart the same failure heals through the retry timer.
+  online = false;
+  await page.getByLabel("지점명", { exact: true }).fill("다시 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  online = true;
+  await page.clock.fastForward(3000);
+  await expect.poll(() => stored.settings.location).toBe("다시 수정");
+  await expect(page.locator(".save-state")).not.toHaveText("저장 실패 · 재시도 중");
+});
+
+test("display windows are read-only and only the real display sends a heartbeat", async ({ page }) => {
+  const clients: (string | undefined)[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/data") clients.push(request.headers()["x-cgv-display"]);
+  });
+  await boot(page, fixture(), true);
+  const token = "a".repeat(32);
+  await page.goto(`/?view=display&kiosk=${token}`);
+  await appReady(page);
+  await expect(page).toHaveTitle("CGV 구로 경품 전시 화면");
+  await page.clock.fastForward(1000);
+  await expect.poll(() => clients.at(-1)).toBe(token);
+  expect(await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY)).toBeNull();
+  // A storage event (administrator edit in the same profile) must not change a display.
+  await page.evaluate(({ key, remote }) => window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) })), { key: STORAGE_KEY, remote: fixture(3) });
+  await expect(page.locator(".display-table tbody tr")).toHaveCount(1);
+
+  await page.goto("/?view=display&monitor=1");
+  await expect(page.locator("html")).toHaveAttribute("data-app-ready", "true");
+  await expect(page).toHaveTitle("CGV 구로 경품 모니터링");
+  clients.length = 0;
+  await page.clock.fastForward(1000);
+  await expect.poll(() => clients.length).toBeGreaterThan(0);
+  expect(clients.every((client) => client === undefined)).toBe(true);
+  expect(await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY)).toBeNull();
+});
+
+test("malformed stored rows are repaired on both screens instead of blanking them", async ({ page }) => {
+  const damaged = { items: [null, 5, { id: "kept" }, item("ok", "정상 영화")], settings: {}, updatedAt: "damaged" } as unknown as ReturnType<typeof fixture>;
+  await boot(page, damaged, true);
+  await expect(page.locator(".display-table tbody tr")).toHaveCount(1);
+  await expect(page.locator(".display-table")).toContainText("정상 영화");
+  await page.goto("/");
+  await expect(page.locator("html")).toHaveAttribute("data-app-ready", "true");
+  await expect(page.locator(".movie-input")).toHaveCount(2);
+  await expect(page.locator(".schedule-badge.invalid")).toHaveText("기간 오류");
+});
+
+test("an open display window that stops fetching is reported as unresponsive", async ({ page }) => {
+  await boot(page);
+  const status = { controller: true, running: true, expected: true, abnormal: false, incidentId: null, incidentAt: null, lastSyncAt: null, responding: true, displaySeenAt: "2026-09-21T03:00:00.000Z" };
+  await page.route("**/display/status", (route) => route.fulfill({ json: status }));
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".monitor-health strong")).toHaveText("전시 창 응답 중");
+  status.responding = false;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".monitor-health strong")).toHaveText("전시 응답 없음");
+  await expect(page.locator(".monitor-health")).toHaveClass(/offline/);
+});
+
+test("deletions can be undone and the sample reset asks first", async ({ page }) => {
+  const data = fixture(3, false, ["공지 1", "공지 2"]);
+  const saved = await boot(page, data);
+  const ids = () => saved().items.map((value) => value.id);
+  const settled = async (expected: unknown, read: () => unknown) => expect.poll(read).toEqual(expected);
+
+  await page.getByRole("button", { name: "영화 1 삭제", exact: true }).click();
+  await settled(["0", "2"], ids);
+  await expect(page.locator(".undo-toast")).toContainText("항목 1개를 삭제했습니다.");
+  // An edit made before undoing is kept; the row returns to its old position.
+  await page.getByLabel("지점명", { exact: true }).fill("신도림");
+  await page.getByRole("button", { name: "되돌리기" }).click();
+  await settled(["0", "1", "2"], ids);
+  expect(saved().settings.location).toBe("신도림");
+  await expect(page.locator(".undo-toast")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "주의사항 1 삭제" }).click();
+  await settled(["공지 2"], () => saved().settings.notices);
+  await page.getByRole("button", { name: "되돌리기" }).click();
+  await settled(["공지 1", "공지 2"], () => saved().settings.notices);
+
+  await page.getByRole("button", { name: "예시 데이터로 초기화" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("경품 3개와 주의사항 2개");
+  await dialog.getByRole("button", { name: "취소" }).click();
+  await expect(page.locator(".movie-input")).toHaveCount(3);
+  expect(ids()).toEqual(["0", "1", "2"]);
+  await page.getByRole("button", { name: "예시 데이터로 초기화" }).click();
+  await dialog.getByRole("button", { name: "예시 데이터로 바꾸기" }).click();
+  await expect(page.locator(".movie-input")).toHaveCount(8);
+  await page.getByRole("button", { name: "되돌리기" }).click();
+  await settled(["0", "1", "2"], ids);
+  expect(saved().settings.location).toBe("신도림");
+
+  // The toast disappears by itself and can be dismissed.
+  await page.getByRole("button", { name: "영화 2 삭제", exact: true }).click();
+  await page.clock.fastForward(15000);
+  await expect(page.locator(".undo-toast")).toHaveCount(0);
+  await settled(["0", "1"], ids);
+});
+
+// A stand-in for the controller that enforces the same optimistic-concurrency
+// contract as the PowerShell server: every write names the revision it was
+// made from and is refused with 409 when that is no longer the stored one.
+async function controller(page: Page, initial = fixture()) {
+  const state = {
+    data: initial,
+    revision: 1000,
+    online: true,
+    dropReplies: 0,
+    delayMs: 0,
+    posts: [] as { base: string | undefined; status: number }[],
+    saveElsewhere(change: (data: ReturnType<typeof fixture>) => void) {
+      const next = JSON.parse(JSON.stringify(state.data)) as ReturnType<typeof fixture>;
+      change(next);
+      next.updatedAt = `2026-09-21T02:00:${String(state.revision % 60).padStart(2, "0")}.000Z`;
+      state.data = next;
+      state.revision += 1;
+    },
+  };
+  const context = page.context();
+  await page.clock.install({ time: new Date("2026-09-21T12:00:00+09:00") });
+  await page.clock.pauseAt(new Date("2026-09-21T12:00:01+09:00"));
+  await context.route("**/display/status", (route) => route.fulfill({ json: { running: false, expected: false, abnormal: false } }));
+  await context.route("**/data", async (route) => {
+    const request = route.request();
+    if (!state.online) return route.abort();
+    if (request.method() !== "POST") return route.fulfill({ json: { ok: true, data: state.data, revision: state.revision } });
+    if (state.delayMs) await new Promise((resolve) => setTimeout(resolve, state.delayMs));
+    const base = request.headers()["x-cgv-base-revision"];
+    if (base === undefined) {
+      state.posts.push({ base, status: 428 });
+      return route.fulfill({ status: 428, json: { ok: false } });
+    }
+    if (Number(base) !== state.revision) {
+      state.posts.push({ base, status: 409 });
+      return route.fulfill({ status: 409, json: { ok: false, conflict: true, revision: state.revision } });
+    }
+    state.data = request.postDataJSON();
+    state.revision += 1;
+    state.posts.push({ base, status: 200 });
+    if (state.dropReplies > 0) { state.dropReplies--; return route.abort(); }
+    return route.fulfill({ json: { ok: true, revision: state.revision } });
+  });
+  return state;
+}
+const appReady = (page: Page) => expect(page.locator("html")).toHaveAttribute("data-app-ready", "true");
+const location = (page: Page) => page.getByLabel("지점명", { exact: true });
+const title = (page: Page) => page.getByLabel("화면 제목", { exact: true });
+
+test("a save conflict keeps both versions and waits for the operator to choose", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/");
+  await appReady(page);
+  server.saveElsewhere((data) => { data.settings.location = "다른 창"; data.items.push(item("x", "다른 창 영화")); });
+  await location(page).fill("이 창");
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("이 창의 수정 내용을 저장하지 않았습니다");
+  await expect(dialog).toContainText("설정이 다름: 지점명");
+  await expect(dialog).toContainText("저장된 내용에만 있음: 다른 창 영화");
+  // Neither side was touched.
+  expect(server.data.settings.location).toBe("다른 창");
+  await expect(location(page)).toHaveValue("이 창");
+
+  // Postponing keeps the edits local, keeps editing possible, and never retries the overwrite.
+  await dialog.getByRole("button", { name: "나중에 선택" }).click();
+  await expect(page.locator(".save-state")).toHaveText("저장 충돌 · 저장 보류");
+  await title(page).fill("보류 중 수정");
+  await page.clock.fastForward(10000);
+  expect(server.data.settings.location).toBe("다른 창");
+  expect(server.posts.filter((post) => post.status === 409)).toHaveLength(1);
+  expect(server.posts.filter((post) => post.status === 200)).toHaveLength(0);
+
+  // The pending conflict and the unsaved edits survive closing and reopening the window.
+  await page.reload();
+  await appReady(page);
+  await expect(dialog).toBeVisible();
+  await expect(location(page)).toHaveValue("이 창");
+  await expect(title(page)).toHaveValue("보류 중 수정");
+  expect(server.data.settings.location).toBe("다른 창");
+
+  await dialog.getByRole("button", { name: "이 창의 내용으로 저장" }).click();
+  await expect.poll(() => server.data.settings.location).toBe("이 창");
+  expect(server.data.settings.title).toBe("보류 중 수정");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".save-state")).not.toHaveText("저장 충돌 · 저장 보류");
+  const kept = page.locator(".recovery-list li");
+  await expect(kept).toHaveCount(1);
+  await expect(kept).toContainText("다른 창에서 저장했던 내용");
+
+  // The version that was not chosen can be brought back; what it replaces is kept in turn.
+  await kept.getByRole("button", { name: "이 버전으로 복원" }).click();
+  await expect.poll(() => server.data.settings.location).toBe("다른 창");
+  expect(server.data.items.some((value) => value.id === "x")).toBe(true);
+  await expect(kept).toHaveCount(1);
+  await expect(kept).toContainText("복원하기 전에 사용하던 내용");
+  await kept.getByRole("button", { name: "삭제", exact: true }).click();
+  await expect(page.locator(".recovery-panel")).toHaveCount(0);
+});
+
+test("choosing the stored version keeps the unsaved edits recoverable", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/");
+  await appReady(page);
+  server.saveElsewhere((data) => { data.settings.location = "다른 창"; });
+  await location(page).fill("이 창");
+  const dialog = page.getByRole("alertdialog");
+  await dialog.getByRole("button", { name: "저장된 최신 내용 사용" }).click();
+  await expect(location(page)).toHaveValue("다른 창");
+  await expect(dialog).toHaveCount(0);
+  expect(server.posts.filter((post) => post.status === 200)).toHaveLength(0);
+  const kept = page.locator(".recovery-list li");
+  await expect(kept).toContainText("이 PC에서 수정했지만 저장하지 않은 내용");
+  await page.reload();
+  await appReady(page);
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(kept).toHaveCount(1);
+  await kept.getByRole("button", { name: "이 버전으로 복원" }).click();
+  await expect.poll(() => server.data.settings.location).toBe("이 창");
+  // The next edit builds on the adopted revision and is accepted without a conflict.
+  await title(page).fill("이어서 수정");
+  await expect.poll(() => server.data.settings.title).toBe("이어서 수정");
+  expect(server.posts.filter((post) => post.status === 409)).toHaveLength(1);
+});
+
+test("rapid edits are saved one at a time and never conflict with themselves", async ({ page }) => {
+  const server = await controller(page);
+  server.delayMs = 40;
+  await page.goto("/");
+  await appReady(page);
+  await location(page).click();
+  const text = "가나다라마바사아자차카타파하";
+  for (const character of text) await page.keyboard.insertText(character);
+  await expect.poll(() => server.data.settings.location).toBe(`구로${text}`);
+  expect(server.posts.every((post) => post.status === 200)).toBe(true);
+  // Each request was based on the revision produced by the one before it.
+  server.posts.forEach((post, index) => expect(Number(post.base)).toBe(1000 + index));
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+});
+
+test("outage edits are retried; a lost reply is not a conflict but a real change is", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/");
+  await appReady(page);
+  const dialog = page.getByRole("alertdialog");
+
+  // The write is stored but its reply never arrives.
+  server.dropReplies = 1;
+  await location(page).fill("응답 유실");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  expect(server.data.settings.location).toBe("응답 유실");
+  await page.clock.fastForward(3000);
+  await expect(page.locator(".save-state")).not.toHaveText("저장 실패 · 재시도 중");
+  await expect(dialog).toHaveCount(0);
+  expect(server.posts.map((post) => post.status)).toEqual([200, 409]);
+
+  // Several edits during an outage arrive as the latest state once the controller returns.
+  server.online = false;
+  await location(page).fill("장애 중 1");
+  await title(page).fill("장애 중 2");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  server.online = true;
+  await page.clock.fastForward(3000);
+  await expect.poll(() => server.data.settings.title).toBe("장애 중 2");
+  expect(server.data.settings.location).toBe("장애 중 1");
+  await expect(dialog).toHaveCount(0);
+
+  // During another outage a different window saves: the retry must not overwrite it.
+  server.online = false;
+  await location(page).fill("장애 중 3");
+  server.saveElsewhere((data) => { data.settings.location = "다른 창"; });
+  server.online = true;
+  await page.clock.fastForward(3000);
+  await expect(dialog).toBeVisible();
+  expect(server.data.settings.location).toBe("다른 창");
+  await expect(location(page)).toHaveValue("장애 중 3");
+});
+
+test("edits made during an outage survive a restart, with or without a competing change", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/");
+  await appReady(page);
+  server.online = false;
+  await location(page).fill("재시작 전 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  // The window is reopened while the controller is still down, then the controller returns.
+  await page.reload();
+  await expect(page.locator(".boot-screen")).toContainText("데이터를 불러오지 못했습니다");
+  server.online = true;
+  await page.clock.fastForward(2000);
+  await appReady(page);
+  await expect(location(page)).toHaveValue("재시작 전 수정");
+  await expect.poll(() => server.data.settings.location).toBe("재시작 전 수정");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+  // Same again, but another window saved in the meantime.
+  server.online = false;
+  await location(page).fill("두 번째 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  server.saveElsewhere((data) => { data.settings.title = "다른 창 제목"; });
+  server.online = true;
+  await page.reload();
+  await appReady(page);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("두 번째 수정");
+  expect(server.data.settings.location).toBe("재시작 전 수정");
+  expect(server.data.settings.title).toBe("다른 창 제목");
+});
+
+test("two administrator windows of one profile take turns without conflicts", async ({ page }) => {
+  const server = await controller(page);
+  const second = await page.context().newPage();
+  await page.goto("/");
+  await second.goto("/");
+  await appReady(page);
+  await appReady(second);
+  await location(page).fill("첫 번째 창");
+  await expect.poll(() => server.data.settings.location).toBe("첫 번째 창");
+  await expect(location(second)).toHaveValue("첫 번째 창");
+  await title(second).fill("두 번째 창");
+  await expect.poll(() => server.data.settings.title).toBe("두 번째 창");
+  await expect(title(page)).toHaveValue("두 번째 창");
+  await location(page).fill("다시 첫 번째 창");
+  await expect.poll(() => server.data.settings.location).toBe("다시 첫 번째 창");
+  expect(server.data.settings.title).toBe("두 번째 창");
+  expect(server.posts.every((post) => post.status === 200)).toBe(true);
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(second.getByRole("alertdialog")).toHaveCount(0);
+});
+
+test("overlapping administrators keep independent snapshots and dirty storage events cannot replace edits", async ({ page }) => {
+  const server = await controller(page);
+  const second = await page.context().newPage();
+  await page.goto("/"); await second.goto("/");
+  await appReady(page); await appReady(second);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  await page.route("**/data", async (route) => {
+    if (route.request().method() === "POST") { held = true; await gate; }
+    await route.fallback();
+  });
+  await location(page).fill("첫 창의 미저장 내용");
+  await expect.poll(() => held).toBe(true);
+  await title(second).fill("둘째 창의 제목");
+  await expect.poll(() => server.data.settings.title).toBe("둘째 창의 제목");
+  await page.evaluate(({ key, remote }) => {
+    localStorage.setItem(key, JSON.stringify(remote));
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) }));
+  }, { key: STORAGE_KEY, remote: server.data });
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await expect(title(page)).toHaveValue("경품 안내");
+  release();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  expect(server.posts.map((post) => [post.base, post.status])).toEqual([["1000", 200], ["1000", 409]]);
+  expect(server.data.settings.location).toBe("구로");
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await page.reload(); await appReady(page);
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await second.close();
+});
+
+test("a clean refresh arriving after a local save cannot roll the administrator back", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  const old = JSON.parse(JSON.stringify(server.data));
+  let held = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/data", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    held = true; await gate;
+    await route.fulfill({ json: { ok: true, data: old, revision: 1000 } });
+  });
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("cgv-guro-gift-display-admin");
+    channel.postMessage({ type: "saved", from: "other-window" }); channel.close();
+  });
+  await expect.poll(() => held).toBe(true);
+  await location(page).fill("읽기 대기 중 수정");
+  await expect.poll(() => server.data.settings.location).toBe("읽기 대기 중 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장됨");
+  release();
+  await expect(location(page)).toHaveValue("읽기 대기 중 수정");
+  await title(page).fill("후속 수정");
+  await expect.poll(() => server.data.settings.title).toBe("후속 수정");
+  expect(server.posts.every((post) => post.status === 200)).toBe(true);
+});
+
+test("save acknowledgments cover only the submitted snapshot and timeout keeps the latest draft", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  let held: import("@playwright/test").Route | null = null;
+  let block = true;
+  await page.route("**/data", (route) => {
+    if (block && route.request().method() === "POST") { held = route; return; }
+    return route.fallback();
+  });
+  await location(page).fill("전송 중");
+  await expect.poll(() => held !== null).toBe(true);
+  await title(page).fill("전송 뒤 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 중…");
+  expect(server.data.settings.location).toBe("구로");
+  await page.clock.fastForward(8000);
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  await expect(title(page)).toHaveValue("전송 뒤 수정");
+  block = false;
+  await page.clock.fastForward(3000);
+  await expect.poll(() => server.data.settings.title).toBe("전송 뒤 수정");
+  expect(server.data.settings.location).toBe("전송 중");
+  await held!.abort().catch(() => undefined);
+});
+
+test("sample reset undo expires after a later edit while its old version stays recoverable", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  await page.getByRole("button", { name: "예시 데이터로 초기화" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "예시 데이터로 바꾸기" }).click();
+  await expect(page.getByRole("button", { name: "되돌리기" })).toBeVisible();
+  await location(page).fill("초기화 후 수정");
+  await expect(page.getByRole("button", { name: "되돌리기" })).toHaveCount(0);
+  await expect.poll(() => server.data.settings.location).toBe("초기화 후 수정");
+  expect(server.data.items).toHaveLength(8);
+  await expect(page.locator(".recovery-list")).toContainText("예시 데이터로 초기화하기 전의 내용");
+});
+
+test("display polling never overlaps and rejects stale sold-out inventory within one server instance", async ({ page }) => {
+  await installClock(page);
+  let revision = 10;
+  let instance = "first";
+  let data = fixture();
+  let reads = 0;
+  let held: import("@playwright/test").Route | null = null;
+  let block = false;
+  await page.route("**/data", (route) => {
+    reads++;
+    if (block) { held = route; return; }
+    return route.fulfill({ json: { ok: true, data, revision, instance } });
+  });
+  await page.goto("/?view=display"); await appReady(page);
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+  revision = 12; data = fixture(); data.items[0].status = "soldout";
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  revision = 11; data = fixture();
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  block = true;
+  await page.clock.fastForward(1000);
+  await expect.poll(() => held !== null).toBe(true);
+  const before = reads;
+  await page.clock.fastForward(3000);
+  expect(reads).toBe(before);
+  await held!.fulfill({ json: { ok: true, data, revision: 10, instance } });
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  // A new server process may deliberately serve a restored older backup.
+  block = false; instance = "restored"; revision = 5;
+  data.items[0].movie = "복원한 영화";
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("복원한 영화");
+  await page.route("**/data", (route) => route.fulfill({ status: 404,
+    json: { ok: false, revision: 0, reset: true, instance: "reset" } }));
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".empty-display")).toBeVisible();
+});
+
+test("opening the kiosk uses persisted data without a second revisionless write", async ({ page }) => {
+  const server = await controller(page);
+  let opens = 0;
+  await page.route("**/display/open", (route) => {
+    opens++; return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto("/"); await appReady(page);
+  await page.getByRole("button", { name: /전시 화면 열기/ }).click();
+  await expect.poll(() => opens).toBe(1);
+  expect(server.posts).toHaveLength(0);
+});
+
+test("a full recovery store cannot silently discard local edits during conflict resolution", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  server.saveElsewhere((data) => { data.settings.location = "서버 내용"; });
+  await location(page).fill("보관해야 할 로컬 내용");
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key.includes("-recovery-")) throw new DOMException("Full", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+  });
+  await page.getByRole("button", { name: "저장된 최신 내용 사용", exact: true }).click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("보관해야 할 로컬 내용");
+  expect(server.data.settings.location).toBe("서버 내용");
+});
+
+test("a database reset during retry requires a decision instead of resurrecting old inventory", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  server.online = false;
+  await location(page).fill("초기화 전 미저장 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  let posts = 0;
+  await page.context().route("**/data", (route) => {
+    if (route.request().method() === "POST") {
+      posts++; return route.fulfill({ status: 409, json: { ok: false, revision: 0 } });
+    }
+    return route.fulfill({ status: 404, json: { ok: false, revision: 0, reset: true, instance: "reset" } });
+  });
+  await page.clock.fastForward(3000);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("초기화 전 미저장 수정");
+  await page.clock.fastForward(10000);
+  expect(posts).toBe(1);
+  await page.reload(); await appReady(page);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("초기화 전 미저장 수정");
+});
+
+for (const [field, label] of [["movie", "영화명"], ["format", "관람 포맷"], ["gift", "경품명"]] as const) {
+  test(`editor retains oversized ${field} and saves only after correction`, async ({ page }) => {
+    const data = fixture(); data.items[0][field] = "가".repeat(2001);
+    const server = await controller(page, data);
+    await page.goto("/"); await appReady(page);
+    await expect(page.locator(".validation-error")).toContainText(label);
+    const input = field === "movie" ? page.locator(".movie-input").first()
+      : field === "format" ? page.locator(".admin-table textarea").nth(1) : page.locator(".gift-input").first();
+    await expect(input).toHaveValue(data.items[0][field]);
+    await title(page).fill("함께 보존할 제목");
+    await page.clock.fastForward(15000);
+    expect(server.posts).toHaveLength(0);
+    await input.fill("올바른 값");
+    await expect.poll(() => server.data.items[0][field]).toBe("올바른 값");
+    expect(server.data.settings.title).toBe("함께 보존할 제목");
+    await expect(page.locator(".validation-error")).toHaveCount(0);
+  });
+}
+
+test("legacy excessive inventory is editable without truncation or hydration writes", async ({ page }) => {
+  const data = fixture(501); data.settings.title = "기존 제목";
+  const server = await controller(page, data);
+  await page.goto("/"); await appReady(page);
+  await expect(page.locator(".movie-input")).toHaveCount(501);
+  await expect(page.locator(".validation-error")).toContainText("500개");
+  await expect(page.getByRole("button", { name: "+ 항목 추가", exact: true })).toBeDisabled();
+  await title(page).fill("목록 수정 중 제목");
+  await page.clock.fastForward(15000);
+  expect(server.posts).toHaveLength(0);
+  expect(server.data.items).toHaveLength(501);
+  await page.getByRole("button", { name: "영화 0 삭제", exact: true }).click();
+  await expect.poll(() => server.data.items.length).toBe(500);
+  expect(server.data.settings.title).toBe("목록 수정 중 제목");
+});
+
+test("HTTP 400 suspends only the rejected snapshot and safely resumes after correction", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  let rejections = 0;
+  let reject = true;
+  await page.route("**/data", (route) => {
+    if (reject && route.request().method() === "POST") {
+      rejections++; return route.fulfill({ status: 400, json: { ok: false,
+        message: "items[0].gift 값 C:\\private\\store.db" } });
+    }
+    return route.fallback();
+  });
+  await location(page).fill("거절 뒤에도 유지할 수정");
+  await expect(page.locator(".validation-error")).toContainText("경품명");
+  await expect(page.locator(".validation-error")).not.toContainText("private");
+  await page.clock.fastForward(30000);
+  expect(rejections).toBe(1);
+  await expect(location(page)).toHaveValue("거절 뒤에도 유지할 수정");
+  reject = false;
+  await title(page).fill("수정 후 저장");
+  await expect.poll(() => server.data.settings.title).toBe("수정 후 저장");
+  expect(server.data.settings.location).toBe("거절 뒤에도 유지할 수정");
+  await expect(page.locator(".validation-error")).toHaveCount(0);
+});
+
+for (const failure of ["quota", "access"] as const) {
+  test(`draft ${failure} failure remains visible during outage and clears after current persistence`, async ({ page }) => {
+    const server = await controller(page);
+    await page.goto("/"); await appReady(page);
+    server.online = false;
+    await page.evaluate((failure) => {
+      const original = Object.getOwnPropertyDescriptor(window, "localStorage")!;
+      const setItem = Storage.prototype.setItem;
+      if (failure === "access") Object.defineProperty(window, "localStorage", { configurable: true,
+        get() { throw new DOMException("Denied", "SecurityError"); } });
+      else Storage.prototype.setItem = function() { throw new DOMException("Full", "QuotaExceededError"); };
+      (window as any).restoreStorage = () => {
+        Object.defineProperty(window, "localStorage", original); Storage.prototype.setItem = setItem;
+      };
+    }, failure);
+    await location(page).fill("메모리에 남은 수정");
+    await expect(page.locator(".draft-warning")).toContainText("이 창에만 있습니다");
+    await expect(page.locator(".draft-warning")).toContainText("창을 닫거나");
+    await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+    await expect(location(page)).toHaveValue("메모리에 남은 수정");
+    await page.evaluate(() => (window as any).restoreStorage());
+    // Restoring local durability clears the warning even while the server is down.
+    await page.clock.fastForward(3000);
+    await expect(page.locator(".draft-warning")).toHaveCount(0);
+    server.online = true;
+    await page.clock.fastForward(3000);
+    await expect.poll(() => server.data.settings.location).toBe("메모리에 남은 수정");
+  });
+}
+
+test("an older acknowledgment cannot clear the warning for newer in-memory-only conflict edits", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  await page.evaluate(() => {
+    Storage.prototype.setItem = function() { throw new DOMException("Full", "QuotaExceededError"); };
+  });
+  let held: import("@playwright/test").Route | null = null;
+  await page.route("**/data", (route) => {
+    if (route.request().method() === "POST" && !held) { held = route; return; }
+    return route.fallback();
+  });
+  await location(page).fill("첫 전송");
+  await expect.poll(() => held !== null).toBe(true);
+  await title(page).fill("아직 전송하지 못한 내용");
+  await expect(page.locator(".draft-warning")).toBeVisible();
+  // Acknowledge only the older snapshot, then force a real competing write.
+  const submitted = held!.request().postDataJSON();
+  server.data = submitted; server.revision++;
+  server.saveElsewhere((data) => { data.settings.location = "다른 창"; });
+  await held!.fulfill({ json: { ok: true, revision: 1001 } });
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(page.locator(".draft-warning")).toBeVisible();
+  await expect(page.locator(".save-state")).not.toHaveAttribute("title", /이 PC에 보관되어/);
+  await page.getByRole("button", { name: "저장된 최신 내용 사용", exact: true }).click();
+  await expect(title(page)).toHaveValue("아직 전송하지 못한 내용");
+  await expect(page.locator(".draft-warning")).toBeVisible();
+});
+
+test("backup warning stays visible through a controller outage until verified success", async ({ page }) => {
+  await controller(page);
+  let online = true;
+  let ok = false;
+  await page.context().route("**/display/status", (route) => online
+    ? route.fulfill({ json: { controller: true, running: false, backup: {
+      ok, error: ok ? null : { message: "백업 실패", at: "2026-11-16T00:00:00Z" }, lastBackupAt: null,
+    } } }) : route.abort());
+  await page.goto("/"); await appReady(page);
+  await expect(page.locator(".backup-warning")).toHaveText("자동 백업 실패");
+  online = false;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".monitor-health strong")).toHaveText("제어 연결 끊김");
+  await expect(page.locator(".backup-warning")).toBeVisible();
+  online = true;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".backup-warning")).toBeVisible();
+  ok = true;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".backup-warning")).toHaveCount(0);
 });

@@ -8,9 +8,21 @@ try {
   $healthy = $false
   try {
     $result = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 1
-    $healthy = [bool]$result.ok -and $result.runtime -eq "powershell"
+    # A server left running by another version of the program (for example
+    # after unpacking an update) is replaced, so the screens and the server
+    # always come from the same package.
+    $expectedVersion = ""
+    if ((Get-Content -Raw -LiteralPath $serverScript) -match '\$script:Version = "([^"]+)"') {
+      $expectedVersion = $Matches[1]
+    }
+    $healthy = (
+      [bool]$result.ok -and
+      $result.runtime -eq "powershell" -and
+      $result.version -eq $expectedVersion
+    )
     if ($result.ok -and -not $healthy) {
       Stop-CgvServer
+      Start-Sleep -Milliseconds 700
     }
   } catch {
     $healthy = $false
@@ -26,7 +38,7 @@ try {
       "Hidden",
       "-File",
       ('"' + $serverScript + '"'),
-      "-NoOpen"
+      "-Supervise"
     ) -WindowStyle Hidden -PassThru
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
       Start-Sleep -Milliseconds 50

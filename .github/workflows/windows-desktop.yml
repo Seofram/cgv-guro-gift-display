@@ -103,106 +103,29 @@ jobs:
           "- Uncompressed: **$sizeMiB MiB** / 10 MiB" >> $env:GITHUB_STEP_SUMMARY
           "- Bundled EXE/Node/Tauri: **none**" >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Verify PowerShell 5 server and existing SQLite schema
+      - name: Verify PowerShell 5 server, concurrency, backups and migration
         shell: powershell
         run: |
-          $packageDirectory = "${{ steps.package.outputs.directory }}"
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "cgv-powershell-local-app-data"
-          New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
-          $env:LOCALAPPDATA = $runtimeRoot
-          $serverScript = Join-Path $packageDirectory "scripts\local-server.ps1"
-          function Start-TestServer {
-            $timer = [Diagnostics.Stopwatch]::StartNew()
-            $process = Start-Process powershell.exe -ArgumentList @(
-              "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
-              "-File", ('"' + $serverScript + '"'), "-NoOpen"
-            ) -WindowStyle Hidden -PassThru
-            $health = $null
-            for ($attempt = 0; $attempt -lt 80; $attempt++) {
-              Start-Sleep -Milliseconds 50
-              if ($process.HasExited) {
-                $log = Join-Path $runtimeRoot "CGVGiftDisplay\server-error.log"
-                $detail = if (Test-Path $log) { Get-Content -Raw $log } else { "no log" }
-                throw "PowerShell server exited: $detail"
-              }
-              try {
-                $health = Invoke-RestMethod "http://127.0.0.1:3210/health" -TimeoutSec 1
-                if ($health.ok) { break }
-              } catch {}
-            }
-            $timer.Stop()
-            if (-not $health.ok) { throw "Server was not ready in four seconds." }
-            if ($health.runtime -ne "powershell") { throw "Unexpected runtime." }
-            if ($timer.ElapsedMilliseconds -gt 3000) {
-              throw "Ready time exceeded 3000 ms: $($timer.ElapsedMilliseconds)"
-            }
-            return @{
-              Process = $process
-              ReadyMs = $timer.ElapsedMilliseconds
-              StartupMs = $health.startupMs
-            }
+          # Starts the packaged server several times against an isolated data
+          # directory: v1.5.0 database migration, optimistic concurrency,
+          # request-origin checks, SQLite snapshot backups, restore, restart
+          # and downgrade. See tests/windows/verify-runtime.ps1.
+          $result = & "tests\windows\verify-runtime.ps1" `
+            -PackageDirectory "${{ steps.package.outputs.directory }}" `
+            -RuntimeRoot (Join-Path $env:RUNNER_TEMP "cgv-powershell-local-app-data")
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($result.Version -ne $version) {
+            throw "Server reports version $($result.Version), expected $version."
           }
-
-          $first = Start-TestServer
-          try {
-            $html = Invoke-WebRequest "http://127.0.0.1:3210/" -UseBasicParsing
-            if ($html.Content -notmatch "html lang=") {
-              throw "Static frontend was not served."
-            }
-            $koreanLocation = [string]([char]0xAD6C) + [char]0xB85C
-            $payload = @{
-              items = @()
-              settings = @{
-                location = $koreanLocation; title = "Gift display"; notices = @()
-                pageSeconds = 8; showSoldout = $true
-              }
-              updatedAt = "2026-08-13T00:00:00.000Z"
-            } | ConvertTo-Json -Depth 5
-            $postArguments = @{
-              Uri = "http://127.0.0.1:3210/data"
-              Method = "Post"
-              ContentType = "application/json; charset=utf-8"
-              Body = $payload
-            }
-            Invoke-RestMethod @postArguments
-            $stored = Invoke-RestMethod "http://127.0.0.1:3210/data"
-            if ($stored.data.settings.location -ne $koreanLocation) {
-              throw "SQLite round trip failed."
-            }
-            $upgraded = $payload | ConvertFrom-Json
-            $upgraded.settings | Add-Member -NotePropertyName rotateNotices -NotePropertyValue $true
-            $postArguments.Body = $upgraded | ConvertTo-Json -Depth 5
-            Invoke-RestMethod @postArguments
-            $database = Join-Path $runtimeRoot "CGVGiftDisplay\inventory.db"
-            $bytes = [IO.File]::ReadAllBytes($database)
-            $expectedHeader = "SQLite format 3" + [char]0
-            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 16) -ne $expectedHeader) {
-              throw "SQLite file format was not preserved."
-            }
-          } finally {
-            Stop-Process -Id $first.Process.Id -Force -ErrorAction SilentlyContinue
-            $first.Process.WaitForExit()
+          foreach ($ready in @($result.FirstReadyMs, $result.RestartReadyMs)) {
+            if ($ready -gt 3000) { throw "Ready time exceeded 3000 ms: $ready" }
           }
-
-          Start-Sleep -Milliseconds 300
-          $second = Start-TestServer
-          try {
-            $stored = Invoke-RestMethod "http://127.0.0.1:3210/data"
-            if ($stored.data.updatedAt -ne "2026-08-13T00:00:00.000Z") {
-              throw "Data did not survive restart."
-            }
-            if ($stored.data.settings.rotateNotices -ne $true) {
-              throw "New display setting did not survive SQLite restart."
-            }
-            "### Runtime verification" >> $env:GITHUB_STEP_SUMMARY
-            "- First ready: **$($first.ReadyMs) ms** / 3000 ms" >> $env:GITHUB_STEP_SUMMARY
-            "- Restart ready: **$($second.ReadyMs) ms** / 3000 ms" >> $env:GITHUB_STEP_SUMMARY
-            "- Script startup: **$($second.StartupMs) ms**" >> $env:GITHUB_STEP_SUMMARY
-            "- SQLite write/read/restart: **passed**" >> $env:GITHUB_STEP_SUMMARY
-            "- Runtime: **Windows PowerShell 5.1**" >> $env:GITHUB_STEP_SUMMARY
-          } finally {
-            Stop-Process -Id $second.Process.Id -Force -ErrorAction SilentlyContinue
-          }
+          "### Runtime verification" >> $env:GITHUB_STEP_SUMMARY
+          "- First ready (with v1.5.0 migration): **$($result.FirstReadyMs) ms** / 3000 ms" >> $env:GITHUB_STEP_SUMMARY
+          "- Restart ready: **$($result.RestartReadyMs) ms** / 3000 ms" >> $env:GITHUB_STEP_SUMMARY
+          "- Script startup: **$($result.StartupMs) ms**" >> $env:GITHUB_STEP_SUMMARY
+          "- Runtime checks passed: **$($result.Checks)**" >> $env:GITHUB_STEP_SUMMARY
+          "- Runtime: **Windows PowerShell 5.1**" >> $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:
@@ -224,6 +147,16 @@ jobs:
         with:
           name: cgv-guro-gift-display-windows-x64
           path: release-artifact
-      - env:
+      - name: Publish release assets
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release-artifact/* --repo "${{ github.repository }}" --generate-notes --title "${{ github.ref_name }}"
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A release created by hand before this job runs receives the
+          # CI-built assets instead of failing the job.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-artifact/* --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" release-artifact/* --repo "$REPO" --generate-notes --title "$TAG"
+          fi
