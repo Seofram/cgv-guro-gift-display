@@ -270,10 +270,22 @@ try {
   $status = Invoke-RestMethod "$api/display/status"
   Assert-That (-not $status.backup.ok -and $status.backup.error.message -and
     (Test-Path (Join-Path $dataDirectory "backup-error.log"))) "backup failure is exposed through status and a persistent log"
+  Stop-TestServer $second
+  $second = Start-TestServer
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That (-not $status.backup.ok -and $status.backup.error.message) "unresolved backup warning survives a real server restart"
+  $afterFailure = Invoke-Api -Path "/data"
+  Assert-That ([long]$afterFailure.Body.revision -eq $revision -and
+    ($afterFailure.Body.data | ConvertTo-Json -Depth 10 -Compress) -eq
+    ($stored.Body.data | ConvertTo-Json -Depth 10 -Compress)) "backup failure and restart leave the complete inventory unchanged"
   Remove-Item -LiteralPath $dailyPath -Force
   $saved = Save-Data ($stored.Body.data | ConvertTo-Json -Depth 10) $revision
   Assert-That ($saved.Status -eq 200 -and $saved.Body.backupOk) "a later verified backup clears the backup warning"
   $revision = [long]$saved.Body.revision
+  Stop-TestServer $second
+  $second = Start-TestServer
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That ($status.backup.ok) "verified backup success remains clear after restart despite the historical error log"
   Invoke-RestMethod "$api/data" -Headers @{
     "X-CGV-Display" = $boundToken; "X-CGV-Display-Revision" = [string]$revision
   } | Out-Null
@@ -286,6 +298,24 @@ try {
   Stop-TestServer $second
 }
 $latestRevision = $revision
+
+Write-Host "== missing, corrupt and inaccessible backup markers =="
+$stateFile = Join-Path $dataDirectory "backup-state.json"
+$validState = [IO.File]::ReadAllBytes($stateFile)
+foreach ($mode in @("missing", "corrupt", "inaccessible")) {
+  Remove-Item -LiteralPath $stateFile -Force
+  if ($mode -eq "corrupt") { [IO.File]::WriteAllText($stateFile, "{broken") }
+  if ($mode -eq "inaccessible") { New-Item -ItemType Directory -Path $stateFile | Out-Null }
+  $metadataServer = Start-TestServer
+  try {
+    $status = Invoke-RestMethod "$api/display/status"
+    Assert-That (-not $status.backup.ok -and $status.backup.error.message) "$mode backup metadata yields a conservative warning"
+    $unchanged = Invoke-Api -Path "/data"
+    Assert-That ([long]$unchanged.Body.revision -eq $revision) "$mode backup metadata does not write the inventory"
+  } finally { Stop-TestServer $metadataServer }
+  if (Test-Path -LiteralPath $stateFile) { Remove-Item -LiteralPath $stateFile -Force }
+  [IO.File]::WriteAllBytes($stateFile, $validState)
+}
 
 Write-Host "== restoring a backup =="
 Copy-Item -LiteralPath $backupPath -Destination $database -Force

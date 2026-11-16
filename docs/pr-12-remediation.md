@@ -27,9 +27,9 @@ Release or production installation change is part of this work.
 ## Verification
 
 - `npm run lint`: passed.
-- `npm test`: passed; type check/build, **22 Node tests**, **40 Microsoft Edge browser tests**.
+- `npm test`: passed; type check/build, **27 Node tests**, **49 Microsoft Edge browser tests**.
 - Fresh packaged installation on **Windows PowerShell 5.1**:
-  `tests/windows/verify-runtime.ps1` passed **67 runtime assertions**, including
+  `tests/windows/verify-runtime.ps1` passed **76 runtime assertions**, including
   four real Edge/PowerShell scenarios: overlapping administrators, delayed
   acknowledgment, process kill/restart while editing, and HTTP 409 during retry.
 - Packaged scripts parse with UTF-8 BOMs. Package is approximately **3.34 MiB**,
@@ -66,3 +66,20 @@ Remaining limits are explicit:
 
 Protocol and recovery details: [data-integrity.md](data-integrity.md).
 Korean operator instructions: [usage guide](../README_사용법.md).
+
+## Final P2 follow-up after re-review of `2003d49`
+
+The three previously corrected blockers are preserved. This follow-up addresses
+only the remaining validation, draft durability and backup warning findings.
+
+| Finding | Focused correction | Targeted evidence |
+| --- | --- | --- |
+| Unchanged HTTP 400 / invalid legacy content | Mirror server schema and payload bounds in the editor, stop retries for the rejected snapshot, retain content for explicit correction, and map only known server schema paths to Korean labels. Remove notice truncation and timing clamping on legacy reads. | Oversized movie/format/gift, 501-item legacy document, no hydration writes, HTTP 400 with no timer retries, subsequent correction and unrelated-edit preservation. Node checks preserve legacy notice/timing values and suppress arbitrary exception details. |
+| Ignored failed local draft writes | Route all important draft attempts through one result-checking helper. Track the exact secured snapshot. Show an in-memory-only warning until the current version reaches browser storage, recovery, or SQLite. Qualify conflict/footer persistence claims. | Edge quota exhaustion and access denial during server outage, later local recovery, and an older acknowledgment followed by a pending conflict with storage still unavailable. |
+| Backup warning lost on restart | Atomically persist unresolved failure / verified success in `backup-state.json`, restore it on startup, and use the existing error log as fallback. Unreadable/corrupt/missing failure metadata is conservative. SQLite online backup and retention remain unchanged. | Real PowerShell 5.1 failure → restart → warning retained → verified backup → restart → warning cleared. Inventory/revision checks and missing/corrupt/unreadable marker checks are included in the Windows suite. |
+
+Compatibility: no database schema, CAS protocol, version, dependency, distribution
+format, kiosk identity or polling changes. Existing v1.5.0 data is still read
+without rewriting SQLite; values over the new write limits require explicit
+correction before a later document can be saved. With an old backup-error log and
+no state marker, the warning stays conservative until a new verified backup.

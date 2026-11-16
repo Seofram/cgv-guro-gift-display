@@ -2034,3 +2034,14 @@ body.display-mode {
   font-weight: 800;
   white-space: nowrap;
 }
+
+.editor-warning {
+  margin: 12px 24px;
+  padding: 12px 16px;
+  border: 1px solid #d84a50;
+  border-radius: 8px;
+  background: #fff5f5;
+  color: #9f252b;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}

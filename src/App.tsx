@@ -20,6 +20,7 @@ import {
 } from "./schedule.mjs";
 import { buildDisplayPages } from "./display-pages.mjs";
 import { stableGroupItemsByMovie } from "./item-order.mjs";
+import { DATA_LIMITS, validateAppData, validationReplyMessage } from "./data-validation.mjs";
 
 type GiftStatus =
   | "available"
@@ -490,7 +491,7 @@ async function loadControllerData(): Promise<LoadOutcome> {
 }
 
 type SaveConflict = { server: AppData; serverRevision: number };
-type SaveState = "saved" | "pending" | "failed";
+type SaveState = "saved" | "pending" | "failed" | "invalid";
 
 export default function Home() {
   const [{ view, monitor, kiosk }] = useState(readViewMode);
@@ -501,6 +502,8 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [draftWarning, setDraftWarning] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
   const [conflict, setConflict] = useState<SaveConflict | null>(null);
   const [recovery, setRecovery] = useState<RecoveryEntry[]>(readRecovery);
@@ -510,6 +513,8 @@ export default function Home() {
   const docRef = useRef(doc);
   // The exact data object known to be stored at `docRef.current.base`.
   const synced = useRef<AppData | null>(null);
+  const securedDraft = useRef<AppData | null>(null);
+  const rejected = useRef<AppData | null>(null);
   const hydratedRef = useRef(false);
   const saving = useRef(false);
   const conflicted = useRef(false);
@@ -524,6 +529,16 @@ export default function Home() {
     setDocState(next);
   };
 
+  // Durability belongs to this exact snapshot, never to an earlier save reply.
+  const persistDraft = (next: Doc) => {
+    const ok = writeDraft(windowId.current, next);
+    if (ok) securedDraft.current = next.data;
+    if (next.data === docRef.current.data) {
+      setDraftWarning(synced.current !== next.data && securedDraft.current !== next.data);
+    }
+    return ok;
+  };
+
   /** Nothing unsaved, nothing in flight, nothing awaiting a decision. */
   const isClean = () =>
     synced.current === docRef.current.data &&
@@ -535,7 +550,13 @@ export default function Home() {
       // Write synchronously before removing a draft or replacing a snapshot.
       // Read storage again so another window's kept versions are retained.
       const current = readRecovery();
-      if (current.some((entry) => sameAppData(entry.data, version))) return true;
+      if (current.some((entry) => sameAppData(entry.data, version))) {
+        if (version === docRef.current.data) {
+          securedDraft.current = version;
+          setDraftWarning(false);
+        }
+        return true;
+      }
       const next = [
         {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -547,6 +568,10 @@ export default function Home() {
       ].slice(0, RECOVERY_LIMIT);
       if (!writeStorage(RECOVERY_KEY, JSON.stringify(next))) return false;
       setRecovery(next);
+      if (version === docRef.current.data) {
+        securedDraft.current = version;
+        setDraftWarning(false);
+      }
       return true;
     },
     [],
@@ -565,11 +590,13 @@ export default function Home() {
     // The last copy known to be in SQLite, for the display fallback.
     writeStorage(STORAGE_KEY, JSON.stringify(sent.data));
     if (docRef.current.data === sent.data) {
+      setDraftWarning(false);
+      setValidationError(null);
       removeDraft(windowId.current);
       setSaveState("saved");
       setSavedTick((tick) => tick + 1);
     } else {
-      writeDraft(windowId.current, docRef.current);
+      persistDraft(docRef.current);
     }
     channel.current?.postMessage({ type: "saved", from: windowId.current });
   };
@@ -584,6 +611,16 @@ export default function Home() {
       for (;;) {
         const sent = docRef.current;
         if (synced.current === sent.data) break;
+        persistDraft(sent);
+        if (rejected.current === sent.data) break;
+        const problem = validateAppData(sent.data);
+        if (problem) {
+          rejected.current = sent.data;
+          setValidationError(problem);
+          setSaveState("invalid");
+          break;
+        }
+        setValidationError(null);
         const reply = await requestJson("/data", {
           method: "POST",
           headers: {
@@ -626,6 +663,15 @@ export default function Home() {
           }
         }
 
+        if (reply?.status === 400) {
+          // A newer edit may already have corrected the submitted snapshot.
+          rejected.current = sent.data;
+          if (docRef.current.data !== sent.data) continue;
+          setValidationError(validationReplyMessage(reply.body));
+          setSaveState("invalid");
+          break;
+        }
+
         // No reply, a timeout, or a server error: the snapshot stays unsaved.
         setSaveState("failed");
         retryTimer.current = window.setTimeout(() => void pump(), 3000);
@@ -647,7 +693,8 @@ export default function Home() {
       // The edit keeps the revision of the data it was made from.
       commit({ data, base: current.base });
       if (!hydratedRef.current || view !== "admin") return;
-      writeDraft(windowId.current, docRef.current);
+      persistDraft(docRef.current);
+      setValidationError(validateAppData(data));
       setSaveState("pending");
       void pump();
     },
@@ -671,6 +718,7 @@ export default function Home() {
       if (latest.revision === docRef.current.base) return;
       synced.current = latest.data;
       commit({ data: latest.data, base: latest.revision });
+      setValidationError(validateAppData(latest.data));
       writeStorage(STORAGE_KEY, JSON.stringify(latest.data));
     } finally {
       refreshing.current = false;
@@ -795,7 +843,7 @@ export default function Home() {
       }
       const claimDraft = () => {
         // Transfer ownership durably before deleting the old window's copy.
-        if (writeDraft(id, docRef.current) && candidate?.id !== id && candidate) {
+        if (persistDraft(docRef.current) && candidate?.id !== id && candidate) {
           removeDraft(candidate.id);
         }
       };
@@ -824,6 +872,7 @@ export default function Home() {
         commit({ data: outcome.data, base: outcome.revision });
         writeStorage(STORAGE_KEY, JSON.stringify(outcome.data));
         setSaveState("saved");
+        setValidationError(validateAppData(outcome.data));
         done();
         return;
       }
@@ -887,7 +936,7 @@ export default function Home() {
       data: docRef.current.data,
       base: latest.kind === "data" ? latest.revision : 0,
     });
-    writeDraft(windowId.current, docRef.current);
+    persistDraft(docRef.current);
     conflicted.current = false;
     setConflict(null);
     setSaveState("pending");
@@ -909,6 +958,8 @@ export default function Home() {
     conflicted.current = false;
     setConflict(null);
     setSaveState("saved");
+    setDraftWarning(false);
+    setValidationError(validateAppData(stored));
     return true;
   }, [stashRecovery]);
 
@@ -1043,6 +1094,8 @@ export default function Home() {
       data={doc.data}
       setData={edit}
       saveState={saveState}
+      validationError={validationError}
+      draftWarning={draftWarning}
       savedTick={savedTick}
       conflict={conflict}
       onKeepLocal={keepLocalVersion}
@@ -1134,6 +1187,8 @@ function AdminScreen({
   data,
   setData,
   saveState,
+  validationError,
+  draftWarning,
   savedTick,
   conflict,
   onKeepLocal,
@@ -1147,6 +1202,8 @@ function AdminScreen({
   data: AppData;
   setData: (update: (current: AppData) => AppData) => void;
   saveState: SaveState;
+  validationError: string | null;
+  draftWarning: boolean;
   savedTick: number;
   conflict: SaveConflict | null;
   onKeepLocal: () => Promise<boolean>;
@@ -1310,7 +1367,9 @@ function AdminScreen({
         }
       } catch {
         if (!disposed) {
-          setMonitorStatus({
+          setMonitorStatus((current) => ({
+            // A controller outage is not evidence that a backup succeeded.
+            backup: current?.backup,
             controller: false,
             running: false,
             expected: false,
@@ -1318,7 +1377,7 @@ function AdminScreen({
             incidentId: null,
             incidentAt: null,
             lastSyncAt: null,
-          });
+          }));
         }
       }
     };
@@ -1649,7 +1708,7 @@ function AdminScreen({
           )}
           <span
             className={`save-state ${
-              conflict || saveState === "failed"
+              conflict || validationError || saveState === "failed"
                 ? "failed"
                 : saveState === "pending"
                   ? "pending"
@@ -1659,17 +1718,19 @@ function AdminScreen({
             }`}
             role="status"
             title={
-              conflict
-                ? "다른 창에서 먼저 저장한 데이터가 있어 이 창의 수정 내용을 저장하지 않았습니다. 수정 내용은 이 PC에 보관되어 있습니다."
+              validationError ?? (conflict
+                ? (draftWarning
+                  ? "수정 내용은 이 창에만 있습니다. 창을 닫으면 잃을 수 있습니다."
+                  : "다른 창에서 먼저 저장한 데이터가 있어 이 창의 수정 내용을 저장하지 않았습니다. 수정 내용은 이 PC에 보관되어 있습니다.")
                 : saveState === "failed"
                   ? "변경 내용이 아직 SQLite에 저장되지 않았습니다. 서버 연결이 복구되면 자동으로 저장합니다."
                   : saveState === "pending"
                     ? "변경 내용을 저장하고 있습니다. 저장이 끝나기 전에는 창을 닫지 마세요."
-                    : undefined
+                    : undefined)
             }
           >
             <i />
-            {conflict
+            {validationError ? "입력 확인 · 저장 보류" : conflict
               ? "저장 충돌 · 저장 보류"
               : saveState === "failed"
                 ? "저장 실패 · 재시도 중"
@@ -1724,6 +1785,16 @@ function AdminScreen({
           </button>
         </div>
       </header>
+
+      {validationError && (
+        <p className="editor-warning validation-error" role="alert">{validationError}</p>
+      )}
+      {draftWarning && (
+        <p className="editor-warning draft-warning" role="alert">
+          최신 수정 내용을 브라우저에 보관하지 못했습니다. 아직 서버에 저장되지 않은 내용은 이 창에만 있습니다.
+          창을 닫거나 브라우저가 종료되면 사라질 수 있습니다. 서버 연결과 브라우저 저장 공간을 확인해 주세요.
+        </p>
+      )}
 
       <section className="admin-content">
         <div className="intro-card">
@@ -1797,13 +1868,13 @@ function AdminScreen({
               <div className="input-with-suffix">
                 <input
                   type="number"
-                  min="3"
-                  max="30"
+                  min="0"
+                  max={DATA_LIMITS.seconds}
                   value={data.settings.pageSeconds}
                   onChange={(event) =>
                     updateSettings(
                       "pageSeconds",
-                      Math.min(3600, Math.max(0, Number(event.target.value) || 0)),
+                      Number(event.target.value),
                     )
                   }
                 />
@@ -1850,7 +1921,9 @@ function AdminScreen({
               >
                 같은 영화 모아 정렬
               </button>
-              <button className="add-button" onClick={addItem}>
+              <button className="add-button" onClick={addItem}
+                disabled={data.items.length >= DATA_LIMITS.items}
+                title={data.items.length >= DATA_LIMITS.items ? "경품은 최대 500개까지 저장할 수 있습니다." : undefined}>
                 + 항목 추가
               </button>
             </div>
@@ -2197,8 +2270,8 @@ function AdminScreen({
           <div className="storage-notice">
             <strong>SQLite 자동 저장</strong>
             <p>
-              데이터는 이 PC의 로컬 저장소에 보관되어 브라우저 데이터를
-              삭제해도 유지됩니다.
+              서버 저장이 완료된 데이터는 이 PC의 SQLite에 보관되어 브라우저 데이터를
+              삭제해도 유지됩니다. 저장 전 수정 내용의 보관 상태는 위쪽 안내를 확인해 주세요.
             </p>
             <small>
               저장 위치: %LOCALAPPDATA%\CGVGiftDisplay\inventory.db · 일일
@@ -2276,8 +2349,9 @@ function AdminScreen({
             <p className="modal-description">
               이 창에서 수정하는 동안 다른 창에서 다른 내용이 먼저
               저장되었습니다. 아무것도 덮어쓰거나 지우지 않았습니다. 사용할
-              내용을 선택해 주세요. 선택하지 않은 내용은 화면 아래{" "}
-              <strong>보관된 버전</strong>에 남아 언제든 복원할 수 있습니다.
+              내용을 선택해 주세요. 선택하지 않은 내용을 화면 아래{" "}
+              <strong>보관된 버전</strong>에 먼저 보관할 수 있을 때만 선택을 적용합니다.
+              {draftWarning && " 현재 수정 내용은 이 창에만 있으므로 창을 닫으면 잃을 수 있습니다."}
             </p>
             <div className="conflict-versions">
               <div>

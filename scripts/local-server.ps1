@@ -41,6 +41,7 @@ $script:PidFile = Join-Path $script:RuntimeDirectory "server.pid"
 $script:BackupDirectory = Join-Path $script:RuntimeDirectory "backups"
 $script:BackupRetentionDays = 14
 $script:BackupErrorLog = Join-Path $script:RuntimeDirectory "backup-error.log"
+$script:BackupStateFile = Join-Path $script:RuntimeDirectory "backup-state.json"
 $script:BackupError = $null
 $script:LastBackupAt = $null
 $script:DisplayTokenFile = Join-Path $script:RuntimeDirectory "display-token.txt"
@@ -481,11 +482,62 @@ function Get-AppDataProblem {
   return $null
 }
 
+function Write-BackupState {
+  # Atomic replacement in the runtime directory. The marker records both
+  # failure and verified success, so historical error logs are unambiguous.
+  $temporary = $script:BackupStateFile + ".tmp"
+  $state = @{
+    ok = ($null -eq $script:BackupError)
+    at = [DateTime]::UtcNow.ToString("o")
+    error = $script:BackupError
+  } | ConvertTo-Json -Depth 4 -Compress
+  [IO.File]::WriteAllText($temporary, $state, (New-Object Text.UTF8Encoding($false)))
+  if (Test-Path -LiteralPath $script:BackupStateFile) {
+    # PS 5.1 converts an ordinary $null string argument to an empty path.
+    [IO.File]::Replace($temporary, $script:BackupStateFile, [NullString]::Value)
+  } else {
+    [IO.File]::Move($temporary, $script:BackupStateFile)
+  }
+}
+
+function Read-BackupState {
+  try {
+    if (-not (Test-Path -LiteralPath $script:BackupStateFile)) {
+      # An older build may have recorded a failure only in the log. Retain a
+      # conservative warning until this build creates a verified backup.
+      if (Test-Path -LiteralPath $script:BackupErrorLog) { throw "unresolved legacy log" }
+      return
+    }
+    $state = ConvertFrom-Json ([IO.File]::ReadAllText($script:BackupStateFile))
+    $recordedAt = [DateTimeOffset]::Parse($state.at)
+    if ($state.ok -isnot [bool]) { throw "invalid backup state" }
+    if (-not $state.ok) {
+      if ($state.error.message -isnot [string] -or $state.error.at -isnot [string]) {
+        throw "invalid backup failure"
+      }
+      $script:BackupError = @{ message = $state.error.message; at = $state.error.at }
+    } elseif (Test-Path -LiteralPath $script:BackupErrorLog) {
+      # Fallback if a later failure could be logged but its marker write failed.
+      $log = Get-Item -LiteralPath $script:BackupErrorLog
+      if ($log.LastWriteTimeUtc -gt $recordedAt.UtcDateTime) { throw "newer backup error" }
+    }
+  } catch {
+    # Missing/corrupt/inaccessible failure metadata is not evidence of success.
+    $script:BackupError = @{
+      message = "이전 백업 상태를 확인하지 못했습니다. 새 백업이 정상적으로 만들어질 때까지 경고를 유지합니다."
+      at = [DateTime]::UtcNow.ToString("o")
+    }
+  }
+}
+
 function Write-BackupFailure {
   param([string]$Message)
   $script:BackupError = @{
     message = $Message
     at = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  try { Write-BackupState } catch {
+    # The existing error log is a durable fallback if the marker is unwritable.
   }
   try {
     [IO.File]::AppendAllText(
@@ -505,6 +557,9 @@ function Save-Snapshot {
   # API, so it is consistent even while the write-ahead log holds data.
   Backup-CgvData -DatabasePath $script:DatabasePath -Destination $BackupPath
   $script:BackupError = $null
+  # A failure to record verified success keeps the warning active. Merely
+  # restarting or finding an older backup must never clear an unresolved error.
+  Write-BackupState
   $script:LastBackupAt = (Get-Date).ToUniversalTime().ToString("o")
   Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "inventory-*.db" |
     Sort-Object Name -Descending |
@@ -780,6 +835,7 @@ try {
     throw "웹 화면 파일을 찾을 수 없습니다: $script:WebRoot"
   }
   New-Item -ItemType Directory -Path $script:RuntimeDirectory -Force | Out-Null
+  Read-BackupState
   Initialize-CgvDataStore -DatabasePath $script:DatabasePath
   if (Test-Path -LiteralPath $script:BackupDirectory -PathType Container) {
     $latestBackup = Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "*.db" |

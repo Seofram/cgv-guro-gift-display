@@ -873,3 +873,143 @@ test("a database reset during retry requires a decision instead of resurrecting 
   await expect(page.getByRole("alertdialog")).toBeVisible();
   await expect(location(page)).toHaveValue("초기화 전 미저장 수정");
 });
+
+for (const [field, label] of [["movie", "영화명"], ["format", "관람 포맷"], ["gift", "경품명"]] as const) {
+  test(`editor retains oversized ${field} and saves only after correction`, async ({ page }) => {
+    const data = fixture(); data.items[0][field] = "가".repeat(2001);
+    const server = await controller(page, data);
+    await page.goto("/"); await appReady(page);
+    await expect(page.locator(".validation-error")).toContainText(label);
+    const input = field === "movie" ? page.locator(".movie-input").first()
+      : field === "format" ? page.locator(".admin-table textarea").nth(1) : page.locator(".gift-input").first();
+    await expect(input).toHaveValue(data.items[0][field]);
+    await title(page).fill("함께 보존할 제목");
+    await page.clock.fastForward(15000);
+    expect(server.posts).toHaveLength(0);
+    await input.fill("올바른 값");
+    await expect.poll(() => server.data.items[0][field]).toBe("올바른 값");
+    expect(server.data.settings.title).toBe("함께 보존할 제목");
+    await expect(page.locator(".validation-error")).toHaveCount(0);
+  });
+}
+
+test("legacy excessive inventory is editable without truncation or hydration writes", async ({ page }) => {
+  const data = fixture(501); data.settings.title = "기존 제목";
+  const server = await controller(page, data);
+  await page.goto("/"); await appReady(page);
+  await expect(page.locator(".movie-input")).toHaveCount(501);
+  await expect(page.locator(".validation-error")).toContainText("500개");
+  await expect(page.getByRole("button", { name: "+ 항목 추가", exact: true })).toBeDisabled();
+  await title(page).fill("목록 수정 중 제목");
+  await page.clock.fastForward(15000);
+  expect(server.posts).toHaveLength(0);
+  expect(server.data.items).toHaveLength(501);
+  await page.getByRole("button", { name: "영화 0 삭제", exact: true }).click();
+  await expect.poll(() => server.data.items.length).toBe(500);
+  expect(server.data.settings.title).toBe("목록 수정 중 제목");
+});
+
+test("HTTP 400 suspends only the rejected snapshot and safely resumes after correction", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  let rejections = 0;
+  let reject = true;
+  await page.route("**/data", (route) => {
+    if (reject && route.request().method() === "POST") {
+      rejections++; return route.fulfill({ status: 400, json: { ok: false,
+        message: "items[0].gift 값 C:\\private\\store.db" } });
+    }
+    return route.fallback();
+  });
+  await location(page).fill("거절 뒤에도 유지할 수정");
+  await expect(page.locator(".validation-error")).toContainText("경품명");
+  await expect(page.locator(".validation-error")).not.toContainText("private");
+  await page.clock.fastForward(30000);
+  expect(rejections).toBe(1);
+  await expect(location(page)).toHaveValue("거절 뒤에도 유지할 수정");
+  reject = false;
+  await title(page).fill("수정 후 저장");
+  await expect.poll(() => server.data.settings.title).toBe("수정 후 저장");
+  expect(server.data.settings.location).toBe("거절 뒤에도 유지할 수정");
+  await expect(page.locator(".validation-error")).toHaveCount(0);
+});
+
+for (const failure of ["quota", "access"] as const) {
+  test(`draft ${failure} failure remains visible during outage and clears after current persistence`, async ({ page }) => {
+    const server = await controller(page);
+    await page.goto("/"); await appReady(page);
+    server.online = false;
+    await page.evaluate((failure) => {
+      const original = Object.getOwnPropertyDescriptor(window, "localStorage")!;
+      const setItem = Storage.prototype.setItem;
+      if (failure === "access") Object.defineProperty(window, "localStorage", { configurable: true,
+        get() { throw new DOMException("Denied", "SecurityError"); } });
+      else Storage.prototype.setItem = function() { throw new DOMException("Full", "QuotaExceededError"); };
+      (window as any).restoreStorage = () => {
+        Object.defineProperty(window, "localStorage", original); Storage.prototype.setItem = setItem;
+      };
+    }, failure);
+    await location(page).fill("메모리에 남은 수정");
+    await expect(page.locator(".draft-warning")).toContainText("이 창에만 있습니다");
+    await expect(page.locator(".draft-warning")).toContainText("창을 닫거나");
+    await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+    await expect(location(page)).toHaveValue("메모리에 남은 수정");
+    await page.evaluate(() => (window as any).restoreStorage());
+    // Restoring local durability clears the warning even while the server is down.
+    await page.clock.fastForward(3000);
+    await expect(page.locator(".draft-warning")).toHaveCount(0);
+    server.online = true;
+    await page.clock.fastForward(3000);
+    await expect.poll(() => server.data.settings.location).toBe("메모리에 남은 수정");
+  });
+}
+
+test("an older acknowledgment cannot clear the warning for newer in-memory-only conflict edits", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  await page.evaluate(() => {
+    Storage.prototype.setItem = function() { throw new DOMException("Full", "QuotaExceededError"); };
+  });
+  let held: import("@playwright/test").Route | null = null;
+  await page.route("**/data", (route) => {
+    if (route.request().method() === "POST" && !held) { held = route; return; }
+    return route.fallback();
+  });
+  await location(page).fill("첫 전송");
+  await expect.poll(() => held !== null).toBe(true);
+  await title(page).fill("아직 전송하지 못한 내용");
+  await expect(page.locator(".draft-warning")).toBeVisible();
+  // Acknowledge only the older snapshot, then force a real competing write.
+  const submitted = held!.request().postDataJSON();
+  server.data = submitted; server.revision++;
+  server.saveElsewhere((data) => { data.settings.location = "다른 창"; });
+  await held!.fulfill({ json: { ok: true, revision: 1001 } });
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(page.locator(".draft-warning")).toBeVisible();
+  await expect(page.locator(".save-state")).not.toHaveAttribute("title", /이 PC에 보관되어/);
+  await page.getByRole("button", { name: "저장된 최신 내용 사용", exact: true }).click();
+  await expect(title(page)).toHaveValue("아직 전송하지 못한 내용");
+  await expect(page.locator(".draft-warning")).toBeVisible();
+});
+
+test("backup warning stays visible through a controller outage until verified success", async ({ page }) => {
+  await controller(page);
+  let online = true;
+  let ok = false;
+  await page.context().route("**/display/status", (route) => online
+    ? route.fulfill({ json: { controller: true, running: false, backup: {
+      ok, error: ok ? null : { message: "백업 실패", at: "2026-11-16T00:00:00Z" }, lastBackupAt: null,
+    } } }) : route.abort());
+  await page.goto("/"); await appReady(page);
+  await expect(page.locator(".backup-warning")).toHaveText("자동 백업 실패");
+  online = false;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".monitor-health strong")).toHaveText("제어 연결 끊김");
+  await expect(page.locator(".backup-warning")).toBeVisible();
+  online = true;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".backup-warning")).toBeVisible();
+  ok = true;
+  await page.clock.fastForward(5000);
+  await expect(page.locator(".backup-warning")).toHaveCount(0);
+});

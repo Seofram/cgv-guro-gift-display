@@ -93,11 +93,11 @@ export function normalizeAppData(data) {
       location: text(settings.location, "구로"),
       title: text(settings.title, "경품 안내"),
       notices: Array.isArray(settings.notices)
-        ? settings.notices.filter((/** @type {unknown} */ notice) => typeof notice === "string").slice(0, 20)
+        ? settings.notices.filter((/** @type {unknown} */ notice) => typeof notice === "string")
         : [],
-      // Kept within the range the controller accepts (0 to 3600 seconds).
+      // Preserve legacy values for explicit validation/correction, never truncate.
       pageSeconds: Number.isFinite(settings.pageSeconds)
-        ? Math.min(3600, Math.max(0, settings.pageSeconds))
+        ? settings.pageSeconds
         : 8,
       showSoldout: settings.showSoldout !== false,
       rotateNotices: settings.rotateNotices === true,

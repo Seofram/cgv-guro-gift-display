@@ -62,8 +62,25 @@ failed read is `500`, never "no data".
   eight seconds (display polling: five); timed-out drafts remain pending for
   retry. Native window control has a separate 25-second bound.
 - **Network failure or server down:** the indicator shows `저장 실패 · 재시도 중`
-  and the latest state is retried every three seconds. Edits stay in the profile
-  and survive closing the window.
+  and the latest state is retried every three seconds. Every important draft
+  write checks its result. If the current snapshot could not be secured in the
+  browser profile, a persistent Korean warning says it exists only in this
+  window and may be lost on close/crash. The edit remains in memory and server
+  saves continue. The warning clears only when that snapshot has a valid local
+  copy, recovery copy, or server acknowledgment; an older acknowledgment cannot
+  clear it for newer edits. Conflict messages use the same durability state.
+- **Validation:** `data-validation.mjs` mirrors the limits in the authoritative
+  PowerShell `Get-AppDataProblem`: 500 items; 100-character unique IDs;
+  2,000-character movie/format/gift/location/title; 20-character editable dates;
+  up to seven weekday values 0–6; 20 notices of 4,000 characters; 0–3,600 seconds;
+  booleans and a nonempty edit timestamp of at most 40 characters. The request
+  body limit is 2,000,000 UTF-8 bytes. The editor reports a Korean field/condition
+  error and keeps all content for correction. Legacy over-limit text, notice
+  counts and timing values are not truncated or clamped on load. A local
+  validation failure never posts to SQLite. An HTTP 400 is permanent for that
+  submitted snapshot: automatic retry stops, and an edit resumes validation and
+  saving. Only known server schema paths map to Korean labels; arbitrary server
+  exception text is never rendered as a validation message.
 - **Lost reply:** if a write was stored but its reply never arrived, the retry is
   answered with 409. The window reads the stored data, sees that it is identical
   to what it is trying to save, and continues without a conflict.
@@ -112,7 +129,12 @@ is switched to rollback-journal mode (one self-contained file), checked with
 kept. A new store also receives a verified backup after its first save. A daily
 backup problem never blocks saving, but is returned as `backupOk: false`, exposed
 through `/display/status`, logged in `backup-error.log`, and shown in Korean on
-the administrator screen. A later successful backup clears the warning.
+the administrator screen. `backup-state.json` atomically records unresolved
+failure or verified success and is restored on startup. Restarting or finding an
+older backup cannot clear the warning. Missing metadata with an existing error
+log, corrupt metadata, or unreadable metadata produces a conservative warning.
+The error log is a fallback when a marker write fails. Only a later successfully
+created and verified backup with its success state recorded clears the warning.
 
 `reset-data.bat` stops the server and creates a separate current
 `backups\pre-reset-<timestamp>.db` through the same online backup API. It verifies
