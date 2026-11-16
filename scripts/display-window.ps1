@@ -1,7 +1,11 @@
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("Open", "Close", "Status")]
-  [string]$Action
+  [string]$Action,
+  # Given to the display page so that its heartbeat can be told apart from
+  # any other window or client.
+  [ValidatePattern("^[0-9a-f]{0,32}$")]
+  [string]$Token = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -244,7 +248,7 @@ $existingBrowserHandles = @(
 )
 $arguments = @(
   "--kiosk",
-  "http://127.0.0.1:3210/?view=display",
+  ("http://127.0.0.1:3210/?view=display" + $(if ($Token) { "&kiosk=$Token" } else { "" })),
   # Quoted explicitly: Windows PowerShell 5.1 does not quote arguments.
   ('--user-data-dir="' + $browser.DisplayProfileDirectory + '"'),
   "--no-first-run",

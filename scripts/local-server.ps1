@@ -40,14 +40,28 @@ $script:ResetMarker = Join-Path $script:RuntimeDirectory "reset-data.flag"
 $script:PidFile = Join-Path $script:RuntimeDirectory "server.pid"
 $script:BackupDirectory = Join-Path $script:RuntimeDirectory "backups"
 $script:BackupRetentionDays = 14
+$script:BackupErrorLog = Join-Path $script:RuntimeDirectory "backup-error.log"
+$script:BackupError = $null
+$script:LastBackupAt = $null
+$script:DisplayTokenFile = Join-Path $script:RuntimeDirectory "display-token.txt"
+$script:DisplayToken = $null
+$script:DisplayRevision = $null
+# Identifies this server process. Clients use it to tell "the same store,
+# later" from "the server was restarted (the store may have been replaced)".
+$script:InstanceId = [Guid]::NewGuid().ToString("N")
+$script:RevisionChangedAt = [DateTime]::UtcNow
+$script:ItemStatuses = @("available", "depleting", "low", "soldout", "ready")
 $script:DisplayExpected = $null
 $script:DisplayRunning = $null
 $script:IncidentId = $null
 $script:IncidentAt = $null
 $script:LastSyncAt = $null
 $script:DisplaySeenAt = $null
-$script:DisplayGraceUntil = [DateTime]::UtcNow.AddSeconds(20)
+# After a server restart an open display reports again within a second or
+# two; a longer start-up allowance applies only right after opening it.
+$script:DisplayGraceUntil = [DateTime]::UtcNow.AddSeconds(5)
 $script:DisplayHeartbeatSeconds = 15
+$script:DisplayDataLagSeconds = 10
 $script:AllowedHosts = @("127.0.0.1:3210", "localhost:3210")
 $script:AllowedOrigins = @("http://127.0.0.1:3210", "http://localhost:3210")
 
@@ -131,9 +145,18 @@ function Read-HttpRequest {
   $requestParts = $lines[0] -split " "
   if ($requestParts.Count -lt 2) { throw "올바르지 않은 HTTP 요청입니다." }
   $headers = @{}
+  $singleValued = @(
+    "host", "origin", "content-length", "content-type", "sec-fetch-site",
+    "x-cgv-base-revision", "x-cgv-display", "x-cgv-display-revision"
+  )
   foreach ($line in ($lines | Select-Object -Skip 1)) {
     if ($line -match "^([^:\s]+):\s*(.*?)\s*$") {
-      $headers[$Matches[1].ToLowerInvariant()] = $Matches[2]
+      $name = $Matches[1].ToLowerInvariant()
+      # A repeated header must not let a later value replace a checked one.
+      if ($headers.ContainsKey($name) -and $name -in $singleValued) {
+        throw "중복된 요청 헤더가 있습니다."
+      }
+      $headers[$name] = $Matches[2]
     }
   }
   $contentLength = 0
@@ -208,10 +231,39 @@ function Invoke-DisplayAction {
   param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("Open", "Close", "Status")]
-    [string]$Action
+    [string]$Action,
+    [string]$Token = ""
   )
-  $output = & (Join-Path $PSScriptRoot "display-window.ps1") -Action $Action
+  $output = & (Join-Path $PSScriptRoot "display-window.ps1") -Action $Action -Token $Token
   return ($output | Out-String).Trim()
+}
+
+# The token given to the display window that this controller opened. Only
+# requests carrying it count as that display's heartbeat. It is kept on disk
+# so an open display is still recognised after a server restart.
+function Get-DisplayToken {
+  if ($null -eq $script:DisplayToken) {
+    $script:DisplayToken = ""
+    if (Test-Path -LiteralPath $script:DisplayTokenFile -PathType Leaf) {
+      $saved = ([IO.File]::ReadAllText($script:DisplayTokenFile)).Trim()
+      if ($saved -match "^[0-9a-f]{32}$") { $script:DisplayToken = $saved }
+    }
+  }
+  return $script:DisplayToken
+}
+
+function Set-DisplayToken {
+  param([string]$Token)
+  $script:DisplayToken = $Token
+  $script:DisplaySeenAt = $null
+  $script:DisplayRevision = $null
+  if ($Token) {
+    [IO.File]::WriteAllText(
+      $script:DisplayTokenFile, $Token, (New-Object Text.UTF8Encoding($false))
+    )
+  } else {
+    Remove-Item -LiteralPath $script:DisplayTokenFile -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Get-DisplayStatus {
@@ -231,19 +283,62 @@ function Get-DisplayStatus {
     $script:IncidentAt = $null
   }
   $script:DisplayRunning = $running
-  # A window alone does not prove the display works: the display page must
-  # also keep fetching inventory. A short grace period covers page start-up.
+  # Three separate facts are reported, none of which proves that the picture
+  # is visible on the secondary monitor:
+  #   window    - a display window exists (title or remembered handle)
+  #   heartbeat - the page in the window this controller opened is running
+  #               and fetching (it presents the token it was opened with)
+  #   data      - the revision that page last applied is the stored one
   $utcNow = [DateTime]::UtcNow
-  $responding = $running -and (
-    $utcNow -lt $script:DisplayGraceUntil -or (
-      $null -ne $script:DisplaySeenAt -and
-      ($utcNow - $script:DisplaySeenAt).TotalSeconds -lt $script:DisplayHeartbeatSeconds
-    )
+  $heartbeatAge = $null
+  if ($null -ne $script:DisplaySeenAt) {
+    $heartbeatAge = [long]($utcNow - $script:DisplaySeenAt).TotalMilliseconds
+  }
+  $heartbeatFresh = (
+    $null -ne $heartbeatAge -and
+    $heartbeatAge -lt ($script:DisplayHeartbeatSeconds * 1000)
+  )
+  $starting = $running -and -not $heartbeatFresh -and $utcNow -lt $script:DisplayGraceUntil
+  $storedRevision = $null
+  try {
+    $record = Read-CgvRecord -DatabasePath $script:DatabasePath
+    $storedRevision = if ($null -eq $record) { 0 } else { $record.Revision }
+  } catch {
+    $storedRevision = $null
+  }
+  $dataCurrent = (
+    $heartbeatFresh -and
+    $null -ne $storedRevision -and
+    $null -ne $script:DisplayRevision -and
+    $script:DisplayRevision -eq $storedRevision
+  )
+  $dataStale = (
+    $heartbeatFresh -and -not $dataCurrent -and
+    ($utcNow - $script:RevisionChangedAt).TotalSeconds -gt $script:DisplayDataLagSeconds
   )
   return @{
     controller = $true
+    instance = $script:InstanceId
     running = $running
-    responding = $responding
+    responding = ($running -and ($heartbeatFresh -or $starting))
+    window = $running
+    starting = $starting
+    heartbeat = @{
+      fresh = $heartbeatFresh
+      ageMs = $heartbeatAge
+      bound = [bool](Get-DisplayToken)
+    }
+    data = @{
+      revision = $storedRevision
+      displayRevision = $script:DisplayRevision
+      current = $dataCurrent
+      stale = $dataStale
+    }
+    backup = @{
+      ok = ($null -eq $script:BackupError)
+      lastBackupAt = $script:LastBackupAt
+      error = $script:BackupError
+    }
     displaySeenAt = $(
       if ($null -ne $script:DisplaySeenAt) { $script:DisplaySeenAt.ToString("o") } else { $null }
     )
@@ -279,26 +374,177 @@ function Test-AppData {
   return $true
 }
 
+function Test-TextValue {
+  param($Value, [int]$MaximumLength)
+  return ($Value -is [string]) -and ($Value.Length -le $MaximumLength)
+}
+
+function Test-NumberValue {
+  param($Value)
+  return (
+    $Value -is [int] -or $Value -is [long] -or
+    $Value -is [double] -or $Value -is [decimal]
+  )
+}
+
+# Full validation of a document before it may be stored. Returns $null when
+# the document is acceptable, otherwise a message naming the first problem.
+# Unknown extra fields are allowed and stored as they are; `rotateNotices`
+# is optional because data from v1.5.0 and earlier does not have it.
+function Get-AppDataProblem {
+  param($Value)
+  $object = [Management.Automation.PSCustomObject]
+  if ($Value -isnot $object) { return "데이터 형식이 올바르지 않습니다." }
+  $names = @($Value.PSObject.Properties.Name)
+  foreach ($required in @("items", "settings", "updatedAt")) {
+    if ($names -cnotcontains $required) { return "$required 항목이 없습니다." }
+  }
+  if (-not (Test-TextValue $Value.updatedAt 40) -or -not $Value.updatedAt) {
+    return "updatedAt 값이 올바르지 않습니다."
+  }
+  if ($Value.items -isnot [Array]) { return "items는 목록이어야 합니다." }
+  if ($Value.items.Count -gt 500) { return "items가 너무 많습니다." }
+
+  $ids = New-Object Collections.Generic.HashSet[string]
+  for ($index = 0; $index -lt $Value.items.Count; $index++) {
+    $item = $Value.items[$index]
+    $label = "items[$index]"
+    if ($item -isnot $object) { return "$label 형식이 올바르지 않습니다." }
+    $fields = @($item.PSObject.Properties.Name)
+    foreach ($field in @(
+      "id", "movie", "format", "gift", "status",
+      "startDate", "endDate", "days", "visible"
+    )) {
+      if ($fields -cnotcontains $field) { return "$label.$field 항목이 없습니다." }
+    }
+    if (-not (Test-TextValue $item.id 100) -or -not $item.id.Trim()) {
+      return "$label.id 값이 올바르지 않습니다."
+    }
+    if (-not $ids.Add($item.id)) { return "$label.id 값이 중복되었습니다." }
+    foreach ($field in @("movie", "format", "gift")) {
+      if (-not (Test-TextValue $item.$field 2000)) {
+        return "$label.$field 값이 올바르지 않습니다."
+      }
+    }
+    if ($item.status -isnot [string] -or $script:ItemStatuses -cnotcontains $item.status) {
+      return "$label.status 값이 올바르지 않습니다."
+    }
+    # Dates are free text here: an incomplete date is stored and shown to
+    # the operator as a period error rather than refused.
+    foreach ($field in @("startDate", "endDate")) {
+      if (-not (Test-TextValue $item.$field 20)) {
+        return "$label.$field 값이 올바르지 않습니다."
+      }
+    }
+    if ($item.days -isnot [Array] -or $item.days.Count -gt 7) {
+      return "$label.days 값이 올바르지 않습니다."
+    }
+    foreach ($day in $item.days) {
+      if ($day -isnot [int] -or $day -lt 0 -or $day -gt 6) {
+        return "$label.days 값이 올바르지 않습니다."
+      }
+    }
+    if ($item.visible -isnot [bool]) { return "$label.visible 값이 올바르지 않습니다." }
+  }
+
+  $settings = $Value.settings
+  if ($settings -isnot $object) { return "settings 형식이 올바르지 않습니다." }
+  $fields = @($settings.PSObject.Properties.Name)
+  foreach ($field in @("location", "title", "notices", "pageSeconds", "showSoldout")) {
+    if ($fields -cnotcontains $field) { return "settings.$field 항목이 없습니다." }
+  }
+  foreach ($field in @("location", "title")) {
+    if (-not (Test-TextValue $settings.$field 2000)) {
+      return "settings.$field 값이 올바르지 않습니다."
+    }
+  }
+  if ($settings.notices -isnot [Array] -or $settings.notices.Count -gt 20) {
+    return "settings.notices 값이 올바르지 않습니다."
+  }
+  foreach ($notice in $settings.notices) {
+    if (-not (Test-TextValue $notice 4000)) {
+      return "settings.notices 값이 올바르지 않습니다."
+    }
+  }
+  if (
+    -not (Test-NumberValue $settings.pageSeconds) -or
+    $settings.pageSeconds -lt 0 -or $settings.pageSeconds -gt 3600
+  ) {
+    return "settings.pageSeconds 값이 올바르지 않습니다."
+  }
+  if ($settings.showSoldout -isnot [bool]) {
+    return "settings.showSoldout 값이 올바르지 않습니다."
+  }
+  if ($fields -ccontains "rotateNotices" -and $settings.rotateNotices -isnot [bool]) {
+    return "settings.rotateNotices 값이 올바르지 않습니다."
+  }
+  return $null
+}
+
+function Write-BackupFailure {
+  param([string]$Message)
+  $script:BackupError = @{
+    message = $Message
+    at = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  try {
+    [IO.File]::AppendAllText(
+      $script:BackupErrorLog,
+      "$($script:BackupError.at) $Message$([Environment]::NewLine)",
+      (New-Object Text.UTF8Encoding($false))
+    )
+  } catch {
+    # The failure is still reported through /display/status.
+  }
+}
+
+function Save-Snapshot {
+  param([Parameter(Mandatory = $true)][string]$BackupPath)
+  New-Item -ItemType Directory -Path $script:BackupDirectory -Force | Out-Null
+  # A verified single-file SQLite snapshot taken with the online backup
+  # API, so it is consistent even while the write-ahead log holds data.
+  Backup-CgvData -DatabasePath $script:DatabasePath -Destination $BackupPath
+  $script:BackupError = $null
+  $script:LastBackupAt = (Get-Date).ToUniversalTime().ToString("o")
+  Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "inventory-*.db" |
+    Sort-Object Name -Descending |
+    Select-Object -Skip $script:BackupRetentionDays |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 # Keeps the inventory as it was before the first change of each day, so an
 # accidental deletion or reset can be recovered by hand. A backup problem
-# must never prevent saving.
+# does not prevent saving, but it is recorded and reported to the
+# administrator screen until a later backup succeeds.
 function Save-DailyBackup {
   try {
     $backupPath = Join-Path $script:BackupDirectory (
       "inventory-" + (Get-Date).ToString("yyyyMMdd") + ".db"
     )
-    if (Test-Path -LiteralPath $backupPath) { return }
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) { return }
     if ($null -eq (Read-CgvRecord -DatabasePath $script:DatabasePath)) { return }
-    New-Item -ItemType Directory -Path $script:BackupDirectory -Force | Out-Null
-    # A verified single-file SQLite snapshot taken with the online backup
-    # API, so it is consistent even while the write-ahead log holds data.
-    Backup-CgvData -DatabasePath $script:DatabasePath -Destination $backupPath
-    Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "inventory-*.db" |
-      Sort-Object Name -Descending |
-      Select-Object -Skip $script:BackupRetentionDays |
-      Remove-Item -Force -ErrorAction SilentlyContinue
+    Save-Snapshot -BackupPath $backupPath
   } catch {
-    # Saving continues without a backup.
+    Write-BackupFailure $_.Exception.Message
+  }
+}
+
+# A new installation has nothing to back up before its first save. Once data
+# exists, make sure at least one backup does too.
+function Save-FirstBackup {
+  try {
+    $existing = @()
+    if (Test-Path -LiteralPath $script:BackupDirectory -PathType Container) {
+      $existing = @(
+        Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "inventory-*.db"
+      )
+    }
+    if ($existing.Count -gt 0) { return }
+    Save-Snapshot -BackupPath (Join-Path $script:BackupDirectory (
+      "inventory-" + (Get-Date).ToString("yyyyMMdd") + ".db"
+    ))
+  } catch {
+    Write-BackupFailure $_.Exception.Message
   }
 }
 
@@ -336,9 +582,7 @@ function Get-RequestRejection {
   if (
     $Request.Method -eq "POST" -and
     $Request.Path -eq "/data" -and
-    -not (Get-RequestHeader $Request "content-type").ToLowerInvariant().StartsWith(
-      "application/json"
-    )
+    (Get-RequestHeader $Request "content-type") -notmatch "^application/json(?:\s*;|$)"
   ) {
     return @{ Status = 415; Message = "application/json 형식만 저장할 수 있습니다." }
   }
@@ -384,13 +628,17 @@ function Invoke-Request {
       }
       return
     }
-    if ((Get-RequestHeader $Request "x-cgv-client") -eq "display") {
+    $displayToken = Get-RequestHeader $Request "x-cgv-display"
+    if ($displayToken -and $displayToken -ceq (Get-DisplayToken)) {
       $script:DisplaySeenAt = [DateTime]::UtcNow
+      $shown = Get-RequestHeader $Request "x-cgv-display-revision"
+      $script:DisplayRevision = if ($shown -match "^\d{1,18}$") { [long]$shown } else { $null }
     }
     if ($null -eq $payload) {
       Write-JsonResponse -Stream $Stream -Status 404 -Value @{
         ok = $false
-        message = "no data"
+        message = "저장된 데이터가 없습니다."
+        instance = $script:InstanceId
         revision = 0
         reset = (Test-Path -LiteralPath $script:ResetMarker)
       }
@@ -398,6 +646,7 @@ function Invoke-Request {
       Write-JsonResponse -Stream $Stream -Status 200 -Value @{
         ok = $true
         data = $storedValue
+        instance = $script:InstanceId
         revision = $record.Revision
       }
     }
@@ -418,8 +667,10 @@ function Invoke-Request {
     try {
       $payload = [Text.Encoding]::UTF8.GetString($Request.Body)
       $value = ConvertFrom-Json $payload
-      if (-not (Test-AppData $value)) { throw "올바르지 않은 데이터입니다." }
+      $problem = Get-AppDataProblem $value
+      if ($problem) { throw $problem }
     } catch {
+      # Nothing has been written; the stored inventory is untouched.
       Write-JsonResponse -Stream $Stream -Status 400 -Value @{
         ok = $false
         message = $_.Exception.Message
@@ -448,9 +699,12 @@ function Invoke-Request {
       }
       Remove-Item -LiteralPath $script:ResetMarker -Force -ErrorAction SilentlyContinue
       $script:LastSyncAt = (Get-Date).ToUniversalTime().ToString("o")
+      $script:RevisionChangedAt = [DateTime]::UtcNow
+      Save-FirstBackup
       Write-JsonResponse -Stream $Stream -Status 200 -Value @{
         ok = $true
         revision = $result.Revision
+        backupOk = ($null -eq $script:BackupError)
       }
     } catch {
       Write-JsonResponse -Stream $Stream -Status 500 -Value @{
@@ -478,10 +732,17 @@ function Invoke-Request {
   ) {
     try {
       $opening = $Request.Path -eq "/display/open"
-      $message = Invoke-DisplayAction -Action $(if ($opening) { "Open" } else { "Close" })
+      if ($opening) {
+        # A fresh token for this display window; an earlier window's
+        # heartbeat no longer counts.
+        Set-DisplayToken ([Guid]::NewGuid().ToString("N"))
+        $message = Invoke-DisplayAction -Action "Open" -Token $script:DisplayToken
+      } else {
+        $message = Invoke-DisplayAction -Action "Close"
+        Set-DisplayToken ""
+      }
       $script:DisplayExpected = $opening
       $script:DisplayRunning = $opening
-      $script:DisplaySeenAt = $null
       $script:DisplayGraceUntil = [DateTime]::UtcNow.AddSeconds(20)
       $script:IncidentId = $null
       $script:IncidentAt = $null
@@ -520,6 +781,13 @@ try {
   }
   New-Item -ItemType Directory -Path $script:RuntimeDirectory -Force | Out-Null
   Initialize-CgvDataStore -DatabasePath $script:DatabasePath
+  if (Test-Path -LiteralPath $script:BackupDirectory -PathType Container) {
+    $latestBackup = Get-ChildItem -LiteralPath $script:BackupDirectory -Filter "*.db" |
+      Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($latestBackup) {
+      $script:LastBackupAt = $latestBackup.LastWriteTimeUtc.ToString("o")
+    }
+  }
   $legacyPath = Join-Path $script:RuntimeDirectory "display-data.json"
   if (
     $null -eq (Read-CgvData -DatabasePath $script:DatabasePath) -and

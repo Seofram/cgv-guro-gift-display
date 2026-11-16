@@ -22,8 +22,15 @@ $api = "http://127.0.0.1:3210"
 $guro = [string][char]0xAD6C + [char]0xB85C
 $checks = New-Object Collections.Generic.List[string]
 
+# Never run an API check against a pre-existing controller (production or
+# another test). Every server used below belongs to this harness.
+$probe = New-Object Net.Sockets.TcpClient
+try { $probe.Connect("127.0.0.1", 3210); $occupied = $true }
+catch { $occupied = $false }
+finally { $probe.Close() }
+if ($occupied) { throw "Port 3210 is occupied; refusing to touch an existing controller." }
 if (Test-Path -LiteralPath $RuntimeRoot) {
-  Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
+  throw "RuntimeRoot must be a new isolated directory; existing data is never removed."
 }
 New-Item -ItemType Directory -Path $dataDirectory -Force | Out-Null
 $env:LOCALAPPDATA = $RuntimeRoot
@@ -138,6 +145,8 @@ function Save-Data {
 Write-Host "== v1.5.0 database is migrated in place =="
 $legacy = Invoke-Fixture @("legacy", $database)
 Assert-That ($legacy.columns -notcontains "revision") "fixture is a v1.5.0 database without a revision column"
+$boundToken = "b" * 32
+[IO.File]::WriteAllText((Join-Path $dataDirectory "display-token.txt"), $boundToken)
 $first = Start-TestServer
 $result = @{ FirstReadyMs = $first.ReadyMs }
 try {
@@ -181,12 +190,47 @@ try {
   $stored = Invoke-Api -Path "/data"
   Assert-That ([long]$stored.Body.revision -eq $revision -and $stored.Body.data.settings.location -eq $guro) "rejected requests changed nothing"
 
+  Write-Host "== deep schema rejection leaves data intact =="
+  $validJson = $legacy.data | ConvertTo-Json -Depth 10
+  foreach ($mutation in @(
+    { param($v) $v.items[0].PSObject.Properties.Remove("movie") },
+    { param($v) $v.items[0].id = "" },
+    { param($v) $v.items = @($v.items[0], $v.items[0]) },
+    { param($v) $v.items[0].movie = 123 },
+    { param($v) $v.items[0].status = "AVAILABLE" },
+    { param($v) $v.items[0].days = @(7) },
+    { param($v) $v.items[0].visible = "true" },
+    { param($v) $v.settings.pageSeconds = -1 },
+    { param($v) $v.settings.pageSeconds = 3601 },
+    { param($v) $v.settings.notices = @($null) },
+    { param($v) $v.settings.showSoldout = 1 },
+    { param($v) $v.settings | Add-Member rotateNotices "true" },
+    { param($v) $v.items[0].startDate = 123 }
+  )) {
+    $bad = $validJson | ConvertFrom-Json
+    & $mutation $bad
+    $rejected = Save-Data ($bad | ConvertTo-Json -Depth 10) $revision
+    Assert-That ($rejected.Status -eq 400) "invalid field mutation $($checks.Count) is rejected"
+  }
+  $afterBad = Invoke-Api -Path "/data"
+  Assert-That ([long]$afterBad.Body.revision -eq $revision -and
+    ($afterBad.Body.data | ConvertTo-Json -Depth 10 -Compress) -eq
+    ($stored.Body.data | ConvertTo-Json -Depth 10 -Compress)) "schema rejection leaves the entire stored document and revision unchanged"
+
   Write-Host "== display heartbeat =="
   $status = Invoke-RestMethod "$api/display/status"
   Assert-That ($null -eq $status.displaySeenAt) "a plain read is not a display heartbeat"
   Invoke-RestMethod "$api/data" -Headers @{ "X-CGV-Client" = "display" } | Out-Null
   $status = Invoke-RestMethod "$api/display/status"
-  Assert-That ($null -ne $status.displaySeenAt) "the display heartbeat is recorded"
+  Assert-That ($null -eq $status.displaySeenAt) "a generic display header cannot establish kiosk health"
+  Invoke-RestMethod "$api/data" -Headers @{ "X-CGV-Display" = ("a" * 32) } | Out-Null
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That ($null -eq $status.displaySeenAt) "an unrelated kiosk token cannot establish kiosk health"
+  Invoke-RestMethod "$api/data" -Headers @{
+    "X-CGV-Display" = $boundToken; "X-CGV-Display-Revision" = [string]$revision
+  } | Out-Null
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That ($status.heartbeat.fresh -and $status.data.current) "only the bound kiosk reporting the applied revision establishes freshness"
   Assert-That (-not $status.running -and -not $status.responding) "a heartbeat without a display window is not a working display"
 
   Write-Host "== daily backup is a valid SQLite snapshot =="
@@ -213,6 +257,31 @@ try {
   Assert-That ([long]$stored.Body.revision -eq $revision) "the revision survives a restart"
   $bytes = [IO.File]::ReadAllBytes($database)
   Assert-That ([Text.Encoding]::ASCII.GetString($bytes, 0, 15) -eq "SQLite format 3") "the store is a SQLite file"
+
+  Write-Host "== backup failures are visible and recover =="
+  $dailyPath = $backupPath
+  $backupPath = Join-Path $RuntimeRoot "original-backup.db"
+  Copy-Item -LiteralPath $dailyPath -Destination $backupPath
+  Remove-Item -LiteralPath $dailyPath -Force
+  New-Item -ItemType Directory -Path $dailyPath | Out-Null
+  $saved = Save-Data ($stored.Body.data | ConvertTo-Json -Depth 10) $revision
+  Assert-That ($saved.Status -eq 200 -and -not $saved.Body.backupOk) "a backup failure is returned without losing the inventory save"
+  $revision = [long]$saved.Body.revision
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That (-not $status.backup.ok -and $status.backup.error.message -and
+    (Test-Path (Join-Path $dataDirectory "backup-error.log"))) "backup failure is exposed through status and a persistent log"
+  Remove-Item -LiteralPath $dailyPath -Force
+  $saved = Save-Data ($stored.Body.data | ConvertTo-Json -Depth 10) $revision
+  Assert-That ($saved.Status -eq 200 -and $saved.Body.backupOk) "a later verified backup clears the backup warning"
+  $revision = [long]$saved.Body.revision
+  Invoke-RestMethod "$api/data" -Headers @{
+    "X-CGV-Display" = $boundToken; "X-CGV-Display-Revision" = [string]$revision
+  } | Out-Null
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That ($status.heartbeat.fresh -and $status.data.current) "a bound kiosk continues reporting after a server restart"
+  Start-Sleep -Seconds 16
+  $status = Invoke-RestMethod "$api/display/status"
+  Assert-That (-not $status.heartbeat.fresh -and -not $status.data.current) "kiosk heartbeat and freshness expire without further requests"
 } finally {
   Stop-TestServer $second
 }
@@ -254,6 +323,51 @@ Assert-That ([long]$wal.walBytesWhenBackedUp -gt 0 -and $wal.mainFileUnchangedBy
 Assert-That ($wal.backup.integrity -eq "ok" -and -not $wal.backupHasCompanionFiles) "the backup taken at that moment is a valid single-file database"
 Assert-That ($wal.backup.updatedAt -eq "2026-08-02T00:00:25.000Z" -and $wal.backup.updatedAt -eq $wal.source.updatedAt) "the backup contains the last committed transaction"
 Assert-That ($wal.source.integrity -eq "ok") "the source database is intact after the backup"
+
+Write-Host "== real Edge administrators and PowerShell process outage =="
+$browserServer = Start-TestServer
+try {
+  & $Node (Join-Path $PSScriptRoot "verify-browser.mjs") $browserServer.Process.Id $serverScript
+  Assert-That ($LASTEXITCODE -eq 0) "real Edge concurrency, delayed acknowledgment, server kill/restart and retry conflict pass"
+} finally {
+  Stop-TestServer $browserServer
+}
+
+Write-Host "== reset refuses an unverified backup and restores its final snapshot =="
+$beforeReset = Invoke-Fixture @("inspect", $database)
+$beforeHash = (Get-FileHash -LiteralPath $database -Algorithm SHA256).Hash
+$confirmation = [string][char]0xCD08 + [char]0xAE30 + [char]0xD654
+$resetScript = Join-Path $PackageDirectory "scripts\reset-data.ps1"
+$lockedFile = [IO.File]::Open($database, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+try {
+  $resetOut = Join-Path $RuntimeRoot "reset-failed.out"
+  $resetErr = Join-Path $RuntimeRoot "reset-failed.err"
+  $reset = Start-Process powershell.exe -ArgumentList @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + $resetScript + '"'),
+    "-Confirmation", $confirmation
+  ) -WindowStyle Hidden -RedirectStandardOutput $resetOut -RedirectStandardError $resetErr -PassThru -Wait
+  Assert-That ($reset.ExitCode -ne 0) "reset fails closed when its current database cannot be backed up"
+} finally { $lockedFile.Dispose() }
+Assert-That ((Get-FileHash -LiteralPath $database -Algorithm SHA256).Hash -eq $beforeHash -and
+  -not (Test-Path (Join-Path $dataDirectory "reset-data.flag"))) "failed pre-reset backup leaves the database byte-identical and does not set a reset marker"
+$reset = Start-Process powershell.exe -ArgumentList @(
+  "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + $resetScript + '"'),
+  "-Confirmation", $confirmation
+) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $RuntimeRoot "reset.out") `
+  -RedirectStandardError (Join-Path $RuntimeRoot "reset.err") -PassThru -Wait
+Assert-That ($reset.ExitCode -eq 0 -and -not (Test-Path $database)) "reset removes live data only after a verified current backup"
+$preReset = Get-ChildItem (Join-Path $dataDirectory "backups") -Filter "pre-reset-*.db" -File |
+  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$copy = Invoke-Fixture @("inspect", $preReset.FullName)
+Assert-That ($copy.integrity -eq "ok" -and
+  ($copy.data | ConvertTo-Json -Depth 10 -Compress) -eq ($beforeReset.data | ConvertTo-Json -Depth 10 -Compress)) "pre-reset snapshot holds exactly the latest document"
+Copy-Item -LiteralPath $preReset.FullName -Destination $database
+$restoredServer = Start-TestServer
+try {
+  $restored = Invoke-Api -Path "/data"
+  Assert-That (($restored.Body.data | ConvertTo-Json -Depth 10 -Compress) -eq
+    ($beforeReset.data | ConvertTo-Json -Depth 10 -Compress)) "the actual server serves the complete pre-reset document after restoration"
+} finally { Stop-TestServer $restoredServer }
 
 Write-Host ""
 Write-Host "$($checks.Count) runtime checks passed."

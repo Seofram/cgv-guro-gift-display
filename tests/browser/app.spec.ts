@@ -18,9 +18,13 @@ const fixture = (count = 1, rotateNotices = false, notices = ["공지 내용을 
 async function boot(page: Page, data = fixture(), display = false) {
   await page.clock.install({ time: new Date("2026-09-21T12:00:00+09:00") });
   await page.clock.pauseAt(new Date("2026-09-21T12:00:01+09:00"));
+  let revision = 1000;
   await page.route("**/data", async (route) => {
-    if (route.request().method() === "POST") data = route.request().postDataJSON();
-    await route.fulfill({ json: { ok: true, data } });
+    if (route.request().method() === "POST") {
+      data = route.request().postDataJSON();
+      revision++;
+    }
+    await route.fulfill({ json: { ok: true, data, revision } });
   });
   await page.route("**/display/status", (route) => route.fulfill({ json: { running: false, expected: false, abnormal: false } }));
   await page.goto(display ? "/?view=display" : "/");
@@ -88,7 +92,7 @@ test("add focuses and reveals movie field; hydration and remote updates do not s
     window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) }));
   }, { key: STORAGE_KEY, remote: { ...saved(), items: [...saved().items, item("remote")] } });
   await expect(page.getByLabel("지점명", { exact: true })).toBeFocused();
-  await expect(page.locator(".movie-input")).toHaveCount(14);
+  await expect(page.locator(".movie-input")).toHaveCount(13);
 });
 
 test("manual ordering, stable trimmed grouping, cursor and responsive day-picker layout remain intact", async ({ page }) => {
@@ -155,7 +159,7 @@ test("sold-out, hidden and scheduled items retain their visibility rules", async
   await expect(page.locator(".display-table tbody tr")).toHaveCount(1);
   data.settings.showSoldout = true;
   data.updatedAt = "2026-09-21T01:00:00.000Z";
-  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data } }));
+  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data, revision: 2000 } }));
   await page.clock.fastForward(1000);
   await expect(page.locator(".display-table tbody tr")).toHaveCount(2);
 });
@@ -188,7 +192,7 @@ test("sync clamps page count and changing cadence cleans up the old timer", asyn
   const remote = fixture(1, true);
   remote.updatedAt = "new-revision";
   remote.settings.pageSeconds = 3;
-  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data: remote } }));
+  await page.route("**/data", (route) => route.fulfill({ json: { ok: true, data: remote, revision: 2000 } }));
   await page.clock.fastForward(1000);
   await expect(page.locator(".page-indicator i")).toHaveCount(2);
   await expect(page.locator(".page-indicator i").nth(1)).toHaveClass("active");
@@ -206,9 +210,16 @@ test("legacy localStorage fallback and active drafts survive unrelated synchroni
   await page.addInitScript(({ data, key }) => localStorage.setItem(key, JSON.stringify(data)), { data, key: STORAGE_KEY });
   // An empty store (404) is the only case where the local copy may seed SQLite;
   // an unreadable store is covered by the failed-read regression below.
-  await page.route("**/data", (route) => route.request().method() === "POST"
-    ? route.fulfill({ json: { ok: true } })
-    : route.fulfill({ status: 404, json: { ok: false, message: "no data", reset: false } }));
+  let stored: ReturnType<typeof fixture> | null = null;
+  let revision = 0;
+  await page.route("**/data", (route) => {
+    if (route.request().method() === "POST") {
+      stored = route.request().postDataJSON(); revision++;
+      return route.fulfill({ json: { ok: true, revision } });
+    }
+    return stored ? route.fulfill({ json: { ok: true, data: stored, revision } })
+      : route.fulfill({ status: 404, json: { ok: false, reset: false } });
+  });
   await page.route("**/display/status", (route) => route.fulfill({ json: { running: false } }));
   await page.goto("/");
   await expect(page.getByRole("switch", { name: "공지 순환" })).toHaveAttribute("aria-checked", "false");
@@ -221,9 +232,8 @@ test("legacy localStorage fallback and active drafts survive unrelated synchroni
   await expect(start).toHaveValue("2026-10-01");
   await page.getByLabel("영화 0 종료일").fill("2026-10-08");
   await page.getByRole("heading", { name: "경품 데이터" }).click();
-  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), STORAGE_KEY);
-  expect(stored.items[0].startDate).toBe("2026-10-01");
-  expect(stored.items[0].gift).toBe("원격 변경");
+  await expect.poll(() => stored?.items[0].startDate).toBe("2026-10-01");
+  expect(stored!.items[0].gift).toBe(data.items[0].gift);
   await page.screenshot({ path: "test-results/admin.png", fullPage: true });
 });
 
@@ -324,11 +334,12 @@ test("save failures are visible, retried, and unsaved edits survive a restart", 
   await installClock(page);
   let online = true;
   let stored = fixture();
+  let revision = 1000;
   await page.route("**/data", (route) => {
-    if (route.request().method() !== "POST") return route.fulfill({ json: { ok: true, data: stored } });
+    if (route.request().method() !== "POST") return route.fulfill({ json: { ok: true, data: stored, revision } });
     if (!online) return route.abort();
     stored = route.request().postDataJSON();
-    return route.fulfill({ json: { ok: true } });
+    return route.fulfill({ json: { ok: true, revision: ++revision } });
   });
   await page.goto("/");
   await expect(page.locator(".save-state")).toHaveText("자동 저장");
@@ -355,12 +366,15 @@ test("save failures are visible, retried, and unsaved edits survive a restart", 
 test("display windows are read-only and only the real display sends a heartbeat", async ({ page }) => {
   const clients: (string | undefined)[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname === "/data") clients.push(request.headers()["x-cgv-client"]);
+    if (new URL(request.url()).pathname === "/data") clients.push(request.headers()["x-cgv-display"]);
   });
   await boot(page, fixture(), true);
+  const token = "a".repeat(32);
+  await page.goto(`/?view=display&kiosk=${token}`);
+  await appReady(page);
   await expect(page).toHaveTitle("CGV 구로 경품 전시 화면");
   await page.clock.fastForward(1000);
-  await expect.poll(() => clients.at(-1)).toBe("display");
+  await expect.poll(() => clients.at(-1)).toBe(token);
   expect(await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY)).toBeNull();
   // A storage event (administrator edit in the same profile) must not change a display.
   await page.evaluate(({ key, remote }) => window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) })), { key: STORAGE_KEY, remote: fixture(3) });
@@ -392,7 +406,7 @@ test("an open display window that stops fetching is reported as unresponsive", a
   const status = { controller: true, running: true, expected: true, abnormal: false, incidentId: null, incidentAt: null, lastSyncAt: null, responding: true, displaySeenAt: "2026-09-21T03:00:00.000Z" };
   await page.route("**/display/status", (route) => route.fulfill({ json: status }));
   await page.clock.fastForward(5000);
-  await expect(page.locator(".monitor-health strong")).toHaveText("전시 정상");
+  await expect(page.locator(".monitor-health strong")).toHaveText("전시 창 응답 중");
   status.responding = false;
   await page.clock.fastForward(5000);
   await expect(page.locator(".monitor-health strong")).toHaveText("전시 응답 없음");
@@ -667,4 +681,195 @@ test("two administrator windows of one profile take turns without conflicts", as
   expect(server.posts.every((post) => post.status === 200)).toBe(true);
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(second.getByRole("alertdialog")).toHaveCount(0);
+});
+
+test("overlapping administrators keep independent snapshots and dirty storage events cannot replace edits", async ({ page }) => {
+  const server = await controller(page);
+  const second = await page.context().newPage();
+  await page.goto("/"); await second.goto("/");
+  await appReady(page); await appReady(second);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  await page.route("**/data", async (route) => {
+    if (route.request().method() === "POST") { held = true; await gate; }
+    await route.fallback();
+  });
+  await location(page).fill("첫 창의 미저장 내용");
+  await expect.poll(() => held).toBe(true);
+  await title(second).fill("둘째 창의 제목");
+  await expect.poll(() => server.data.settings.title).toBe("둘째 창의 제목");
+  await page.evaluate(({ key, remote }) => {
+    localStorage.setItem(key, JSON.stringify(remote));
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(remote) }));
+  }, { key: STORAGE_KEY, remote: server.data });
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await expect(title(page)).toHaveValue("경품 안내");
+  release();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  expect(server.posts.map((post) => [post.base, post.status])).toEqual([["1000", 200], ["1000", 409]]);
+  expect(server.data.settings.location).toBe("구로");
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await page.reload(); await appReady(page);
+  await expect(location(page)).toHaveValue("첫 창의 미저장 내용");
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await second.close();
+});
+
+test("a clean refresh arriving after a local save cannot roll the administrator back", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  const old = JSON.parse(JSON.stringify(server.data));
+  let held = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/data", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    held = true; await gate;
+    await route.fulfill({ json: { ok: true, data: old, revision: 1000 } });
+  });
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("cgv-guro-gift-display-admin");
+    channel.postMessage({ type: "saved", from: "other-window" }); channel.close();
+  });
+  await expect.poll(() => held).toBe(true);
+  await location(page).fill("읽기 대기 중 수정");
+  await expect.poll(() => server.data.settings.location).toBe("읽기 대기 중 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장됨");
+  release();
+  await expect(location(page)).toHaveValue("읽기 대기 중 수정");
+  await title(page).fill("후속 수정");
+  await expect.poll(() => server.data.settings.title).toBe("후속 수정");
+  expect(server.posts.every((post) => post.status === 200)).toBe(true);
+});
+
+test("save acknowledgments cover only the submitted snapshot and timeout keeps the latest draft", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  let held: import("@playwright/test").Route | null = null;
+  let block = true;
+  await page.route("**/data", (route) => {
+    if (block && route.request().method() === "POST") { held = route; return; }
+    return route.fallback();
+  });
+  await location(page).fill("전송 중");
+  await expect.poll(() => held !== null).toBe(true);
+  await title(page).fill("전송 뒤 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 중…");
+  expect(server.data.settings.location).toBe("구로");
+  await page.clock.fastForward(8000);
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  await expect(title(page)).toHaveValue("전송 뒤 수정");
+  block = false;
+  await page.clock.fastForward(3000);
+  await expect.poll(() => server.data.settings.title).toBe("전송 뒤 수정");
+  expect(server.data.settings.location).toBe("전송 중");
+  await held!.abort().catch(() => undefined);
+});
+
+test("sample reset undo expires after a later edit while its old version stays recoverable", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  await page.getByRole("button", { name: "예시 데이터로 초기화" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "예시 데이터로 바꾸기" }).click();
+  await expect(page.getByRole("button", { name: "되돌리기" })).toBeVisible();
+  await location(page).fill("초기화 후 수정");
+  await expect(page.getByRole("button", { name: "되돌리기" })).toHaveCount(0);
+  await expect.poll(() => server.data.settings.location).toBe("초기화 후 수정");
+  expect(server.data.items).toHaveLength(8);
+  await expect(page.locator(".recovery-list")).toContainText("예시 데이터로 초기화하기 전의 내용");
+});
+
+test("display polling never overlaps and rejects stale sold-out inventory within one server instance", async ({ page }) => {
+  await installClock(page);
+  let revision = 10;
+  let instance = "first";
+  let data = fixture();
+  let reads = 0;
+  let held: import("@playwright/test").Route | null = null;
+  let block = false;
+  await page.route("**/data", (route) => {
+    reads++;
+    if (block) { held = route; return; }
+    return route.fulfill({ json: { ok: true, data, revision, instance } });
+  });
+  await page.goto("/?view=display"); await appReady(page);
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+  revision = 12; data = fixture(); data.items[0].status = "soldout";
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  revision = 11; data = fixture();
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  block = true;
+  await page.clock.fastForward(1000);
+  await expect.poll(() => held !== null).toBe(true);
+  const before = reads;
+  await page.clock.fastForward(3000);
+  expect(reads).toBe(before);
+  await held!.fulfill({ json: { ok: true, data, revision: 10, instance } });
+  await expect(page.locator(".display-table")).toContainText("재고 소진");
+  // A new server process may deliberately serve a restored older backup.
+  block = false; instance = "restored"; revision = 5;
+  data.items[0].movie = "복원한 영화";
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".display-table")).toContainText("복원한 영화");
+  await page.route("**/data", (route) => route.fulfill({ status: 404,
+    json: { ok: false, revision: 0, reset: true, instance: "reset" } }));
+  await page.clock.fastForward(1000);
+  await expect(page.locator(".empty-display")).toBeVisible();
+});
+
+test("opening the kiosk uses persisted data without a second revisionless write", async ({ page }) => {
+  const server = await controller(page);
+  let opens = 0;
+  await page.route("**/display/open", (route) => {
+    opens++; return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto("/"); await appReady(page);
+  await page.getByRole("button", { name: /전시 화면 열기/ }).click();
+  await expect.poll(() => opens).toBe(1);
+  expect(server.posts).toHaveLength(0);
+});
+
+test("a full recovery store cannot silently discard local edits during conflict resolution", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  server.saveElsewhere((data) => { data.settings.location = "서버 내용"; });
+  await location(page).fill("보관해야 할 로컬 내용");
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key.includes("-recovery-")) throw new DOMException("Full", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+  });
+  await page.getByRole("button", { name: "저장된 최신 내용 사용", exact: true }).click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("보관해야 할 로컬 내용");
+  expect(server.data.settings.location).toBe("서버 내용");
+});
+
+test("a database reset during retry requires a decision instead of resurrecting old inventory", async ({ page }) => {
+  const server = await controller(page);
+  await page.goto("/"); await appReady(page);
+  server.online = false;
+  await location(page).fill("초기화 전 미저장 수정");
+  await expect(page.locator(".save-state")).toHaveText("저장 실패 · 재시도 중");
+  let posts = 0;
+  await page.context().route("**/data", (route) => {
+    if (route.request().method() === "POST") {
+      posts++; return route.fulfill({ status: 409, json: { ok: false, revision: 0 } });
+    }
+    return route.fulfill({ status: 404, json: { ok: false, revision: 0, reset: true, instance: "reset" } });
+  });
+  await page.clock.fastForward(3000);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("초기화 전 미저장 수정");
+  await page.clock.fastForward(10000);
+  expect(posts).toBe(1);
+  await page.reload(); await appReady(page);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await expect(location(page)).toHaveValue("초기화 전 미저장 수정");
 });

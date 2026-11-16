@@ -63,15 +63,31 @@ type DisplayMonitorStatus = {
   incidentId: string | null;
   incidentAt: string | null;
   lastSyncAt: string | null;
-  // Absent on controllers older than the display heartbeat.
+  // The fields below are absent on older controllers.
   responding?: boolean;
   displaySeenAt?: string | null;
+  // Separate facts; none proves the picture is visible on the monitor.
+  starting?: boolean;
+  heartbeat?: { fresh: boolean; ageMs: number | null; bound: boolean };
+  data?: {
+    revision: number | null;
+    displayRevision: number | null;
+    current: boolean;
+    stale: boolean;
+  };
+  backup?: {
+    ok: boolean;
+    lastBackupAt: string | null;
+    error: { message: string; at: string } | null;
+  };
 };
 
 const STORAGE_KEY = "cgv-guro-gift-display-v1";
-// The controller revision this profile's copy is based on, and whether the
-// copy holds edits that SQLite has not confirmed yet.
-const SYNC_KEY = "cgv-guro-gift-display-sync-v1";
+// One entry per administrator window: its unsaved document together with the
+// controller revision that document was derived from.
+const DRAFT_PREFIX = "cgv-guro-gift-display-draft-v1:";
+const LOCK_PREFIX = "cgv-guro-gift-display-admin:";
+const ADMIN_CHANNEL = "cgv-guro-gift-display-admin";
 // Versions set aside when a save conflict was resolved; nothing is discarded.
 const RECOVERY_KEY = "cgv-guro-gift-display-recovery-v1";
 const RECOVERY_LIMIT = 20;
@@ -246,15 +262,23 @@ function paginateGroups(
   return pages.length ? pages : [[]];
 }
 
-type ViewMode = { view: "admin" | "display"; monitor: boolean };
+type ViewMode = {
+  view: "admin" | "display";
+  monitor: boolean;
+  kiosk: string | null;
+};
 
 function readViewMode(): ViewMode {
   const params = new URLSearchParams(window.location.search);
+  const kiosk = params.get("kiosk") ?? "";
   return {
     view: params.get("view") === "display" ? "display" : "admin",
     // The monitoring popup is a read-only preview and never counts as the
     // real secondary-monitor display.
     monitor: params.get("monitor") === "1",
+    // Given by the controller to the display window it opened; only that
+    // window's requests count as the display heartbeat.
+    kiosk: /^[0-9a-f]{32}$/.test(kiosk) ? kiosk : null,
   };
 }
 
@@ -288,19 +312,117 @@ function readLocalData(): AppData | null {
   }
 }
 
-type SyncMeta = { baseRevision: number; dirty: boolean };
+// How long a request to the local controller may take before it is treated
+// as failed. The state it carried stays unsaved and is retried.
+const REQUEST_TIMEOUT_MS = 8000;
+const DISPLAY_TIMEOUT_MS = 5000;
 
-function readSyncMeta(): SyncMeta | null {
+type Reply = { ok: boolean; status: number; body: Record<string, unknown> | null };
+
+/** One request with a time limit covering both the reply and its body. */
+async function requestJson(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Reply | null> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const parsed = JSON.parse(readStorage(SYNC_KEY) ?? "null") as SyncMeta | null;
-    return parsed &&
-      Number.isSafeInteger(parsed.baseRevision) &&
-      parsed.baseRevision >= 0 &&
-      typeof parsed.dirty === "boolean"
-      ? parsed
-      : null;
+    const response = await fetch(`${CONTROLLER_URL}${path}`, {
+      cache: "no-store",
+      ...init,
+      signal: controller.signal,
+    });
+    const body = (await response.json().catch(() => null)) as
+      | Record<string, unknown>
+      | null;
+    return { ok: response.ok, status: response.status, body };
   } catch {
     return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unsaved work of one administrator window.
+//
+// Every window keeps its own document: the data on screen together with the
+// controller revision that data was derived from. The pair is never split:
+// an edit keeps the revision of the data it was made from, and the revision
+// only changes when this window's own save is acknowledged or when the window
+// (with nothing unsaved) adopts a newer stored document.
+// ---------------------------------------------------------------------------
+
+type Doc = { data: AppData; base: number };
+
+type Draft = { id: string; baseRevision: number; touchedAt: number; data: AppData };
+
+/** New for each document, including duplicated tabs (which copy sessionStorage). */
+function getWindowId() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function readDrafts(): Draft[] {
+  const drafts: Draft[] = [];
+  try {
+    for (let index = 0; index < window.localStorage.length; index++) {
+      const key = window.localStorage.key(index);
+      if (!key?.startsWith(DRAFT_PREFIX)) continue;
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as
+          | Partial<Draft>
+          | null;
+        if (
+          parsed &&
+          Number.isSafeInteger(parsed.baseRevision) &&
+          (parsed.baseRevision as number) >= 0 &&
+          isAppDataLike(parsed.data)
+        ) {
+          drafts.push({
+            id: key.slice(DRAFT_PREFIX.length),
+            baseRevision: parsed.baseRevision as number,
+            touchedAt: typeof parsed.touchedAt === "number" ? parsed.touchedAt : 0,
+            data: normalizeAppData(parsed.data) as AppData,
+          });
+        }
+      } catch {
+        // An unreadable draft is left in place rather than deleted.
+      }
+    }
+  } catch {
+    // Storage unavailable: there are no drafts to recover.
+  }
+  return drafts;
+}
+
+function writeDraft(id: string, doc: Doc) {
+  return writeStorage(
+    `${DRAFT_PREFIX}${id}`,
+    JSON.stringify({ baseRevision: doc.base, touchedAt: Date.now(), data: doc.data }),
+  );
+}
+
+function removeDraft(id: string) {
+  writeStorage(`${DRAFT_PREFIX}${id}`, null);
+}
+
+/**
+ * Ids of administrator windows that are open right now. Each window holds a
+ * Web Lock named after its id for as long as it lives; the browser releases
+ * it when the window closes or crashes, so no timers or messages are needed.
+ */
+async function liveWindowIds() {
+  try {
+    const state = await navigator.locks.query();
+    return new Set(
+      (state.held ?? [])
+        .map((lock) => lock.name ?? "")
+        .filter((name) => name.startsWith(LOCK_PREFIX))
+        .map((name) => name.slice(LOCK_PREFIX.length)),
+    );
+  } catch {
+    return new Set<string>();
   }
 }
 
@@ -309,7 +431,8 @@ type RecoveryEntry = {
   savedAt: string;
   // "local": edits from this PC that were not saved. "server": what another
   // window had saved. "replaced": what was on screen before a restore.
-  source: "local" | "server" | "replaced";
+  // "reset": what was on screen before the sample reset.
+  source: "local" | "server" | "replaced" | "reset";
   data: AppData;
 };
 
@@ -335,278 +458,414 @@ function readRecovery(): RecoveryEntry[] {
 }
 
 type LoadOutcome =
-  | { kind: "data"; data: AppData; revision: number }
-  | { kind: "empty"; reset: boolean }
+  | { kind: "data"; data: AppData; revision: number; instance: string | null }
+  | { kind: "empty"; reset: boolean; instance: string | null }
   | { kind: "failed" };
 
-async function loadControllerData(): Promise<LoadOutcome> {
-  try {
-    const response = await fetch(`${CONTROLLER_URL}/data`, {
-      cache: "no-store",
-    });
-    if (response.ok) {
-      const result = (await response.json()) as {
-        data?: unknown;
-        revision?: unknown;
-      };
-      return isAppDataLike(result.data)
-        ? {
-            kind: "data",
-            data: normalizeAppData(result.data) as AppData,
-            revision:
-              typeof result.revision === "number" ? result.revision : 0,
-          }
-        : { kind: "failed" };
-    }
-    if (response.status === 404) {
-      const result = (await response.json().catch(() => ({}))) as {
-        reset?: boolean;
-      };
-      return { kind: "empty", reset: Boolean(result.reset) };
-    }
-  } catch {
-    // Fall through: an unreadable store is never treated as an empty one.
+function readLoad(reply: Reply | null): LoadOutcome {
+  if (!reply || !reply.body) return { kind: "failed" };
+  if (reply.ok) {
+    return isAppDataLike(reply.body.data)
+      ? {
+          kind: "data",
+          data: normalizeAppData(reply.body.data) as AppData,
+          revision:
+            typeof reply.body.revision === "number" ? reply.body.revision : 0,
+          instance:
+            typeof reply.body.instance === "string" ? reply.body.instance : null,
+        }
+      : { kind: "failed" };
+  }
+  // Only the controller's own "nothing stored yet" answer counts as empty.
+  // Any other 404 (a proxy, a wrong server) is a failed read.
+  if (reply.status === 404 && typeof reply.body.reset === "boolean") {
+    return { kind: "empty", reset: reply.body.reset,
+      instance: typeof reply.body.instance === "string" ? reply.body.instance : null };
   }
   return { kind: "failed" };
 }
 
+async function loadControllerData(): Promise<LoadOutcome> {
+  return readLoad(await requestJson("/data"));
+}
+
 type SaveConflict = { server: AppData; serverRevision: number };
+type SaveState = "saved" | "pending" | "failed";
 
 export default function Home() {
-  const [data, setData] = useState<AppData>(cloneSample);
+  const [{ view, monitor, kiosk }] = useState(readViewMode);
+  const [doc, setDocState] = useState<Doc>(() => ({
+    data: cloneSample(),
+    base: 0,
+  }));
   const [hydrated, setHydrated] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [saveFailed, setSaveFailed] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [savedTick, setSavedTick] = useState(0);
   const [conflict, setConflict] = useState<SaveConflict | null>(null);
   const [recovery, setRecovery] = useState<RecoveryEntry[]>(readRecovery);
-  const [{ view, monitor }] = useState(readViewMode);
-  const dataRef = useRef(data);
-  // The exact state object known to be stored in SQLite. Identity, not a
-  // timestamp, decides whether a save is needed.
-  const syncedData = useRef<AppData | null>(null);
-  // Fallback for the base revision when localStorage is unavailable.
-  const memoryBase = useRef(0);
+
+  // The authoritative document. It is changed only through `commit`, always
+  // synchronously, so data and base revision can never be seen out of step.
+  const docRef = useRef(doc);
+  // The exact data object known to be stored at `docRef.current.base`.
+  const synced = useRef<AppData | null>(null);
+  const hydratedRef = useRef(false);
   const saving = useRef(false);
   const conflicted = useRef(false);
+  const refreshing = useRef(false);
   const retryTimer = useRef<number | undefined>(undefined);
-  const displayRevision = useRef<number | null>(null);
+  const windowId = useRef("");
+  if (!windowId.current) windowId.current = getWindowId();
+  const channel = useRef<BroadcastChannel | null>(null);
 
-  // The base revision is shared by every administrator window of this
-  // profile, so a second window never saves from a revision another window
-  // has already moved past.
-  const currentBase = () => readSyncMeta()?.baseRevision ?? memoryBase.current;
-  const setBase = (baseRevision: number, dirty: boolean) => {
-    memoryBase.current = baseRevision;
-    writeStorage(SYNC_KEY, JSON.stringify({ baseRevision, dirty }));
+  const commit = (next: Doc) => {
+    docRef.current = next;
+    setDocState(next);
   };
+
+  /** Nothing unsaved, nothing in flight, nothing awaiting a decision. */
+  const isClean = () =>
+    synced.current === docRef.current.data &&
+    !saving.current &&
+    !conflicted.current;
 
   const stashRecovery = useCallback(
     (source: RecoveryEntry["source"], version: AppData) => {
-      setRecovery((current) => {
-        if (current.some((entry) => sameAppData(entry.data, version))) {
-          return current;
-        }
-        const next = [
-          {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            savedAt: new Date().toISOString(),
-            source,
-            data: version,
-          },
-          ...current,
-        ].slice(0, RECOVERY_LIMIT);
-        writeStorage(RECOVERY_KEY, JSON.stringify(next));
-        return next;
-      });
+      // Write synchronously before removing a draft or replacing a snapshot.
+      // Read storage again so another window's kept versions are retained.
+      const current = readRecovery();
+      if (current.some((entry) => sameAppData(entry.data, version))) return true;
+      const next = [
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          savedAt: new Date().toISOString(),
+          source,
+          data: version,
+        },
+        ...current,
+      ].slice(0, RECOVERY_LIMIT);
+      if (!writeStorage(RECOVERY_KEY, JSON.stringify(next))) return false;
+      setRecovery(next);
+      return true;
     },
     [],
   );
 
-  // Saves are strictly serialized: one request at a time, each based on the
-  // revision returned by the previous one. A request can therefore never
-  // conflict with this window's own earlier request.
+  /**
+   * `sent` (data plus the revision it was sent with) is now stored as
+   * `revision`. Only that exact object is marked as persisted. Anything the
+   * operator typed meanwhile was typed on top of `sent`, so it now derives
+   * from `revision` and is saved next.
+   */
+  const acknowledge = (sent: Doc, revision: number) => {
+    synced.current = sent.data;
+    const current = docRef.current;
+    if (current.base === sent.base) commit({ data: current.data, base: revision });
+    // The last copy known to be in SQLite, for the display fallback.
+    writeStorage(STORAGE_KEY, JSON.stringify(sent.data));
+    if (docRef.current.data === sent.data) {
+      removeDraft(windowId.current);
+      setSaveState("saved");
+      setSavedTick((tick) => tick + 1);
+    } else {
+      writeDraft(windowId.current, docRef.current);
+    }
+    channel.current?.postMessage({ type: "saved", from: windowId.current });
+  };
+
+  // Saves are strictly serialized: one request at a time. Each request sends
+  // a snapshot together with the revision that snapshot derives from.
   const pump = useCallback(async () => {
     if (saving.current || conflicted.current) return;
     saving.current = true;
     window.clearTimeout(retryTimer.current);
     try {
       for (;;) {
-        const pending = dataRef.current;
-        if (syncedData.current === pending) break;
-        const base = currentBase();
-        let response: Response | null = null;
-        try {
-          response = await fetch(`${CONTROLLER_URL}/data`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-CGV-Base-Revision": String(base),
-            },
-            body: JSON.stringify(pending),
-          });
-        } catch {
-          response = null;
-        }
+        const sent = docRef.current;
+        if (synced.current === sent.data) break;
+        const reply = await requestJson("/data", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CGV-Base-Revision": String(sent.base),
+          },
+          body: JSON.stringify(sent.data),
+        });
 
-        if (response?.ok) {
-          const result = (await response.json().catch(() => ({}))) as {
-            revision?: unknown;
-          };
-          syncedData.current = pending;
-          setBase(
-            typeof result.revision === "number" ? result.revision : base,
-            dataRef.current !== pending,
-          );
-          setSaveFailed(false);
+        if (reply?.ok && Number.isSafeInteger(reply.body?.revision) &&
+            (reply.body!.revision as number) > sent.base) {
+          acknowledge(sent, reply.body!.revision as number);
           continue;
         }
 
-        if (response?.status === 409) {
+        if (reply?.status === 409) {
           const latest = await loadControllerData();
           if (latest.kind === "data") {
-            if (sameAppData(latest.data, pending)) {
-              // SQLite already holds exactly this state: an earlier request
-              // was stored but its reply was lost, or another window saved
-              // the same edit. Nothing differs, so there is no conflict.
-              syncedData.current = pending;
-              setBase(latest.revision, dataRef.current !== pending);
-              setSaveFailed(false);
+            if (sameAppData(latest.data, sent.data)) {
+              // SQLite already holds exactly this snapshot: an earlier
+              // request was stored but its reply was lost.
+              acknowledge(sent, latest.revision);
               continue;
             }
-            // Different data was saved elsewhere first. Keep this window's
-            // edits untouched and let the operator decide.
+            // Different data was stored first. This window's edits and its
+            // base revision stay exactly as they are; the stored version is
+            // kept alongside until the operator decides.
             conflicted.current = true;
             setConflict({
               server: latest.data,
               serverRevision: latest.revision,
             });
-            setSaveFailed(false);
             break;
           }
           if (latest.kind === "empty") {
-            // The store was emptied while this window stayed open. The
-            // operator's visible inventory is written back rather than lost.
-            setBase(0, true);
-            continue;
+            // A deliberate reset must not be undone by an automatic retry.
+            conflicted.current = true;
+            setConflict({ server: { ...docRef.current.data, items: [] }, serverRevision: 0 });
+            break;
           }
         }
 
-        setSaveFailed(true);
+        // No reply, a timeout, or a server error: the snapshot stays unsaved.
+        setSaveState("failed");
         retryTimer.current = window.setTimeout(() => void pump(), 3000);
         break;
       }
     } finally {
       saving.current = false;
     }
-    // Refs and storage helpers only; nothing here changes between renders.
+    // Refs and module helpers only; nothing here changes between renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Every administrator edit goes through here. */
+  const edit = useCallback(
+    (update: (current: AppData) => AppData) => {
+      const current = docRef.current;
+      const data = update(current.data);
+      if (data === current.data) return;
+      // The edit keeps the revision of the data it was made from.
+      commit({ data, base: current.base });
+      if (!hydratedRef.current || view !== "admin") return;
+      writeDraft(windowId.current, docRef.current);
+      setSaveState("pending");
+      void pump();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pump, view],
+  );
+
+  /**
+   * Another window (or PC) stored something. A window with nothing unsaved
+   * follows it. A window with unsaved work is left untouched: its own save
+   * will be refused by the controller and shown as a conflict.
+   */
+  const refreshIfClean = useCallback(async () => {
+    if (!hydratedRef.current || refreshing.current || !isClean()) return;
+    refreshing.current = true;
+    const original = docRef.current;
+    try {
+      const latest = await loadControllerData();
+      // Re-checked after the wait: an edit may have started meanwhile.
+      if (latest.kind !== "data" || !isClean() || docRef.current !== original) return;
+      if (latest.revision === docRef.current.base) return;
+      synced.current = latest.data;
+      commit({ data: latest.data, base: latest.revision });
+      writeStorage(STORAGE_KEY, JSON.stringify(latest.data));
+    } finally {
+      refreshing.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onServerRevision = useCallback(
+    (revision: number) => {
+      if (revision !== docRef.current.base) void refreshIfClean();
+    },
+    [refreshIfClean],
+  );
+
+  // What the display has applied: only later revisions of the same server
+  // process are accepted afterwards.
+  const shown = useRef<{ instance: string | null; revision: number | null }>({
+    instance: null,
+    revision: null,
+  });
 
   useEffect(() => {
     let disposed = false;
     let hydrateTimer: number | undefined;
+    let releaseLock: (() => void) | undefined;
     document.body.classList.toggle("display-mode", view === "display");
     const localData = readLocalData();
+    const id = windowId.current;
 
-    const finish = (initialData: AppData, stored: boolean) => {
-      syncedData.current = stored ? initialData : null;
-      setData(initialData);
+    if (view === "admin") {
+      // Marks this window as alive for other windows (see liveWindowIds).
+      try {
+        void navigator.locks.request(
+          `${LOCK_PREFIX}${id}`,
+          () => disposed ? undefined : new Promise<void>((resolve) => (releaseLock = resolve)),
+        ).catch(() => undefined);
+      } catch {
+        // Without Web Locks every other draft is treated as abandoned.
+      }
+      try {
+        channel.current = new BroadcastChannel(ADMIN_CHANNEL);
+        channel.current.onmessage = (event: MessageEvent) => {
+          const message = event.data as { type?: string; from?: string } | null;
+          if (message?.type === "saved" && message.from !== id) {
+            void refreshIfClean();
+          }
+        };
+      } catch {
+        channel.current = null;
+      }
+    }
+
+    const done = () => {
+      hydratedRef.current = true;
       setLoadFailed(false);
       setHydrated(true);
     };
 
     const hydrate = async () => {
-      const outcome = await loadControllerData();
+      const [outcome, live] = await Promise.all([
+        loadControllerData(),
+        view === "admin" ? liveWindowIds() : Promise.resolve(new Set<string>()),
+      ]);
       if (disposed) return;
 
+      if (outcome.kind === "failed") {
+        // The store could not be read. A display may keep showing its last
+        // copy, but the administrator must not start from (and then save) a
+        // stale or sample copy over the real inventory.
+        if (view === "display" && localData) {
+          commit({ data: localData, base: 0 });
+          done();
+          return;
+        }
+        setLoadFailed(true);
+        hydrateTimer = window.setTimeout(() => void hydrate(), 2000);
+        return;
+      }
+
+      if (view !== "admin") {
+        if (outcome.kind === "data") {
+          shown.current = {
+            instance: outcome.instance,
+            revision: outcome.revision > 0 ? outcome.revision : null,
+          };
+          commit({ data: outcome.data, base: outcome.revision });
+        } else {
+          shown.current = { instance: outcome.instance, revision: 0 };
+          commit({ data: { ...(localData ?? cloneSample()), items: [] }, base: 0 });
+        }
+        done();
+        return;
+      }
+
+      // Unsaved work left in this profile: this window's own (a reload), or
+      // that of a window that no longer exists. Drafts of windows that are
+      // still open belong to those windows and are not touched.
+      const drafts = readDrafts();
+      // Earlier PR builds used one shared draft. Migrate it once without
+      // silently treating unacknowledged inventory as persisted.
+      try {
+        const oldKey = "cgv-guro-gift-display-sync-v1";
+        const old = JSON.parse(readStorage(oldKey) ?? "null") as
+          { dirty?: boolean; baseRevision?: number } | null;
+        if (old?.dirty && Number.isSafeInteger(old.baseRevision) &&
+            old.baseRevision! >= 0 && localData) {
+          drafts.push({ id: "legacy", baseRevision: old.baseRevision!, touchedAt: 0, data: localData });
+          if (!stashRecovery("local", localData)) throw new Error("draft unavailable");
+        }
+        writeStorage(oldKey, null);
+      } catch { /* Leave unreadable legacy metadata in place. */ }
+      const abandoned = drafts
+        .filter((draft) => draft.id !== id && !live.has(draft.id))
+        .sort((left, right) => right.touchedAt - left.touchedAt);
+      const candidate = drafts.find((draft) => draft.id === id) ?? abandoned[0];
+      for (const draft of abandoned) {
+        // The most recent one is continued below; older ones are kept for
+        // the operator under "보관된 버전". None is discarded.
+        if (draft !== candidate) {
+          if (stashRecovery("local", draft.data)) removeDraft(draft.id);
+        }
+      }
+      const claimDraft = () => {
+        // Transfer ownership durably before deleting the old window's copy.
+        if (writeDraft(id, docRef.current) && candidate?.id !== id && candidate) {
+          removeDraft(candidate.id);
+        }
+      };
+
       if (outcome.kind === "data") {
-        displayRevision.current = outcome.revision;
-        const meta = readSyncMeta();
-        const unsavedLocal =
-          view === "admin" &&
-          localData !== null &&
-          meta?.dirty === true &&
-          !sameAppData(localData, outcome.data);
-        if (unsavedLocal && localData) {
-          if (meta?.baseRevision !== outcome.revision) {
-            // Edits made here never reached SQLite (for example the server
-            // stopped), and different data has been saved since. Neither
-            // version is dropped: the operator chooses.
+        if (candidate && !sameAppData(candidate.data, outcome.data)) {
+          synced.current = null;
+          commit({ data: candidate.data, base: candidate.baseRevision });
+          claimDraft();
+          setSaveState("pending");
+          if (candidate.baseRevision !== outcome.revision) {
+            // Different data has been stored since these edits were made.
             conflicted.current = true;
             setConflict({
               server: outcome.data,
               serverRevision: outcome.revision,
             });
           }
-          // Otherwise the edits are based on what is stored and are simply
-          // saved now.
-          finish(localData, false);
+          done();
+          void pump();
           return;
         }
-        if (view === "admin") setBase(outcome.revision, false);
-        finish(outcome.data, true);
+        removeDraft(id);
+        if (candidate) removeDraft(candidate.id);
+        synced.current = outcome.data;
+        commit({ data: outcome.data, base: outcome.revision });
+        writeStorage(STORAGE_KEY, JSON.stringify(outcome.data));
+        setSaveState("saved");
+        done();
         return;
       }
-      if (outcome.kind === "empty") {
-        if (view === "admin") setBase(0, false);
-        finish((outcome.reset ? null : localData) ?? cloneSample(), false);
+
+      // Nothing is stored yet (first run, or after reset-data.bat).
+      if (outcome.reset && candidate) {
+        synced.current = null;
+        commit({ data: candidate.data, base: candidate.baseRevision });
+        claimDraft();
+        conflicted.current = true;
+        setConflict({ server: { ...candidate.data, items: [] }, serverRevision: 0 });
+        done();
         return;
       }
-      // The store could not be read. A display may keep showing its last
-      // copy, but the administrator must not start from (and then save) a
-      // stale or sample copy over the real inventory.
-      if (view === "display" && localData) {
-        finish(localData, false);
-        return;
-      }
-      setLoadFailed(true);
-      hydrateTimer = window.setTimeout(() => void hydrate(), 2000);
+      const initial =
+        (outcome.reset ? null : (candidate?.data ?? localData)) ?? cloneSample();
+      synced.current = null;
+      commit({ data: initial, base: 0 });
+      claimDraft();
+      setSaveState("pending");
+      done();
+      void pump();
     };
     void hydrate();
 
     const onStorage = (event: StorageEvent) => {
-      if (event.key === RECOVERY_KEY) {
-        setRecovery(readRecovery());
-        return;
-      }
-      if (event.key === STORAGE_KEY && event.newValue) {
-        try {
-          const incoming: unknown = JSON.parse(event.newValue);
-          if (isAppDataLike(incoming)) {
-            // Another administrator window of this profile made this edit
-            // and is responsible for saving it; this window only mirrors it.
-            const mirrored = normalizeAppData(incoming) as AppData;
-            syncedData.current = mirrored;
-            setData(mirrored);
-          }
-        } catch {
-          // Ignore malformed storage events and retain the current inventory.
-        }
-      }
+      // Inventory is never taken from another window's storage writes: it
+      // comes from the controller, with its revision, and only into a window
+      // that has nothing unsaved.
+      if (event.key === RECOVERY_KEY) setRecovery(readRecovery());
     };
-    // Only administrator windows exchange edits through localStorage.
-    // Display windows follow SQLite through the controller alone.
     if (view === "admin") window.addEventListener("storage", onStorage);
     return () => {
       disposed = true;
       window.clearTimeout(hydrateTimer);
       window.removeEventListener("storage", onStorage);
+      channel.current?.close();
+      channel.current = null;
+      releaseLock?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
-
-  useEffect(() => {
-    dataRef.current = data;
-    // Display windows are read-only consumers: they never write shared
-    // storage, so a late poll response cannot roll back administrator edits.
-    if (!hydrated || view !== "admin") return;
-    const kept = writeStorage(STORAGE_KEY, JSON.stringify(data));
-    if (syncedData.current === data) return;
-    // The local copy is marked as holding unsaved edits only when it really
-    // contains them; otherwise a later start could mistake an older copy
-    // for newer work.
-    if (kept) setBase(currentBase(), true);
-    void pump();
-  }, [data, hydrated, view, pump]);
 
   useEffect(() => () => window.clearTimeout(retryTimer.current), []);
 
@@ -615,31 +874,41 @@ export default function Home() {
   const keepLocalVersion = useCallback(async () => {
     const latest = await loadControllerData();
     if (latest.kind === "failed") return false;
-    if (latest.kind === "data") {
-      if (!sameAppData(latest.data, dataRef.current)) {
-        stashRecovery("server", latest.data);
-      }
-      setBase(latest.revision, true);
-    } else {
-      setBase(0, true);
+    if (latest.kind === "data" && latest.revision !== conflict?.serverRevision) {
+      setConflict({ server: latest.data, serverRevision: latest.revision });
+      return false;
     }
+    if (latest.kind === "data" && !sameAppData(latest.data, docRef.current.data)) {
+      if (!stashRecovery("server", latest.data)) return false;
+    }
+    // The operator has seen the stored version and chosen to save this
+    // window's content over it, so it is now sent against that revision.
+    commit({
+      data: docRef.current.data,
+      base: latest.kind === "data" ? latest.revision : 0,
+    });
+    writeDraft(windowId.current, docRef.current);
     conflicted.current = false;
     setConflict(null);
+    setSaveState("pending");
     void pump();
     return true;
-  }, [pump, stashRecovery]);
+  }, [pump, stashRecovery, conflict]);
 
   const adoptServerVersion = useCallback(async () => {
     const latest = await loadControllerData();
-    if (latest.kind !== "data") return false;
-    if (!sameAppData(latest.data, dataRef.current)) {
-      stashRecovery("local", dataRef.current);
+    if (latest.kind === "failed") return false;
+    const stored = latest.kind === "data" ? latest.data : { ...docRef.current.data, items: [] };
+    if (!sameAppData(stored, docRef.current.data)) {
+      if (!stashRecovery("local", docRef.current.data)) return false;
     }
-    syncedData.current = latest.data;
-    setBase(latest.revision, false);
+    synced.current = stored;
+    commit({ data: stored, base: latest.kind === "data" ? latest.revision : 0 });
+    removeDraft(windowId.current);
+    writeStorage(STORAGE_KEY, JSON.stringify(stored));
     conflicted.current = false;
     setConflict(null);
-    setData(latest.data);
+    setSaveState("saved");
     return true;
   }, [stashRecovery]);
 
@@ -647,20 +916,20 @@ export default function Home() {
     (id: string) => {
       const entry = recovery.find((candidate) => candidate.id === id);
       if (!entry) return;
-      if (!sameAppData(entry.data, dataRef.current)) {
-        stashRecovery("replaced", dataRef.current);
+      if (!sameAppData(entry.data, docRef.current.data)) {
+        if (!stashRecovery("replaced", docRef.current.data)) return;
       }
       setRecovery((current) => {
         const next = current.filter((candidate) => candidate.id !== id);
         writeStorage(RECOVERY_KEY, JSON.stringify(next));
         return next;
       });
-      setData((current) => ({
+      edit((current) => ({
         ...entry.data,
         updatedAt: nextUpdatedAt(current.updatedAt),
       }));
     },
-    [recovery, stashRecovery],
+    [edit, recovery, stashRecovery],
   );
 
   const deleteRecovery = useCallback((id: string) => {
@@ -687,36 +956,64 @@ export default function Home() {
     if (!hydrated || view !== "display") return;
 
     let disposed = false;
+    let inFlight = false;
     const syncDisplayData = async () => {
+      // One request at a time: a slow reply can never arrive after a newer
+      // one, because the newer one is not sent until the slow one has
+      // finished or timed out.
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const response = await fetch(`${CONTROLLER_URL}/data`, {
-          cache: "no-store",
-          // Lets the controller confirm that the real display is alive.
-          headers: monitor ? undefined : { "X-CGV-Client": "display" },
-        });
-        if (!response.ok) return;
-        const result = (await response.json()) as {
-          data?: unknown;
-          revision?: unknown;
-        };
-        const incoming = result.data;
-        if (!disposed && isAppDataLike(incoming)) {
-          const next = normalizeAppData(incoming) as AppData;
-          const revision =
-            typeof result.revision === "number" && result.revision > 0
-              ? result.revision
-              : null;
-          const revisionChanged =
-            revision !== null && revision !== displayRevision.current;
-          displayRevision.current = revision;
-          setData((current) =>
-            revisionChanged || next.updatedAt !== current.updatedAt
-              ? next
-              : current,
-          );
+        const reply = await requestJson(
+          "/data",
+          {
+            // The window opened by the controller identifies itself with the
+            // token it was opened with and reports the revision it shows.
+            headers: kiosk
+              ? {
+                  "X-CGV-Display": kiosk,
+                  "X-CGV-Display-Revision": String(shown.current.revision ?? 0),
+                }
+              : undefined,
+          },
+          DISPLAY_TIMEOUT_MS,
+        );
+        const latest = readLoad(reply);
+        if (disposed || latest.kind === "failed") return;
+        if (latest.kind === "empty") {
+          // Confirmed empty/reset stores show no gifts, never cached stock.
+          shown.current = { instance: latest.instance, revision: 0 };
+          commit({ data: { ...docRef.current.data, items: [] }, base: 0 });
+          return;
         }
-      } catch {
-        // Keep showing the last received inventory until the controller returns.
+
+        if (latest.revision <= 0) {
+          // A controller without revisions: fall back to the edit timestamp.
+          if (shown.current.revision === null &&
+              latest.data.updatedAt > docRef.current.data.updatedAt) {
+            commit({ data: latest.data, base: 0 });
+          }
+          return;
+        }
+        const known = shown.current;
+        const sameServer = latest.instance === known.instance;
+        // Within one server process revisions only grow, so anything that is
+        // not later is stale and ignored. After a server restart the store
+        // may have been replaced (reset or restored backup); whatever the new
+        // process holds is then taken as the new starting point.
+        const accept =
+          known.revision === null ||
+          (sameServer
+            ? latest.revision > known.revision
+            : latest.revision !== known.revision);
+        if (accept) {
+          shown.current = { instance: latest.instance, revision: latest.revision };
+          commit({ data: latest.data, base: latest.revision });
+        } else if (!sameServer && latest.revision === known.revision) {
+          shown.current = { instance: latest.instance, revision: latest.revision };
+        }
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -726,7 +1023,8 @@ export default function Home() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [hydrated, view, monitor]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, view, kiosk]);
 
   if (!hydrated) {
     return (
@@ -739,18 +1037,21 @@ export default function Home() {
   }
 
   return view === "display" ? (
-    <DisplayScreen data={data} />
+    <DisplayScreen data={doc.data} />
   ) : (
     <AdminScreen
-      data={data}
-      setData={setData}
-      saveFailed={saveFailed}
+      data={doc.data}
+      setData={edit}
+      saveState={saveState}
+      savedTick={savedTick}
       conflict={conflict}
       onKeepLocal={keepLocalVersion}
       onUseServer={adoptServerVersion}
       recovery={recovery}
+      onStash={stashRecovery}
       onRestoreRecovery={restoreRecovery}
       onDeleteRecovery={deleteRecovery}
+      onServerRevision={onServerRevision}
     />
   );
 }
@@ -814,6 +1115,7 @@ const RECOVERY_LABELS: Record<RecoveryEntry["source"], string> = {
   local: "이 PC에서 수정했지만 저장하지 않은 내용",
   server: "다른 창에서 저장했던 내용",
   replaced: "복원하기 전에 사용하던 내용",
+  reset: "예시 데이터로 초기화하기 전의 내용",
 };
 
 function downloadVersion(entry: RecoveryEntry) {
@@ -831,23 +1133,29 @@ function downloadVersion(entry: RecoveryEntry) {
 function AdminScreen({
   data,
   setData,
-  saveFailed,
+  saveState,
+  savedTick,
   conflict,
   onKeepLocal,
   onUseServer,
   recovery,
+  onStash,
   onRestoreRecovery,
   onDeleteRecovery,
+  onServerRevision,
 }: {
   data: AppData;
-  setData: React.Dispatch<React.SetStateAction<AppData>>;
-  saveFailed: boolean;
+  setData: (update: (current: AppData) => AppData) => void;
+  saveState: SaveState;
+  savedTick: number;
   conflict: SaveConflict | null;
   onKeepLocal: () => Promise<boolean>;
   onUseServer: () => Promise<boolean>;
   recovery: RecoveryEntry[];
+  onStash: (source: RecoveryEntry["source"], version: AppData) => boolean;
   onRestoreRecovery: (id: string) => void;
   onDeleteRecovery: (id: string) => void;
+  onServerRevision: (revision: number) => void;
 }) {
   // A new conflict always opens the dialog; "나중에 선택" only hides it.
   const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
@@ -865,7 +1173,14 @@ function AdminScreen({
     setConflictError(!resolved);
     if (resolved) setConflictDialogOpen(false);
   };
+  // "저장됨" is shown only after the controller has acknowledged the save.
   const [savedPulse, setSavedPulse] = useState(false);
+  useEffect(() => {
+    if (savedTick === 0) return;
+    setSavedPulse(true);
+    const timer = window.setTimeout(() => setSavedPulse(false), 900);
+    return () => window.clearTimeout(timer);
+  }, [savedTick]);
   const [expandedDayRow, setExpandedDayRow] = useState<string | null>(null);
   const [expiryPromptOpen, setExpiryPromptOpen] = useState(false);
   const [resetPromptOpen, setResetPromptOpen] = useState(false);
@@ -875,7 +1190,14 @@ function AdminScreen({
     id: number;
     message: string;
     restore: (current: AppData) => AppData;
+    // Set for an undo that puts back a whole earlier snapshot: it applies
+    // only while the data is still exactly what the action produced, so it
+    // can never overwrite edits made afterwards.
+    validFor?: AppData;
   } | null>(null);
+  useEffect(() => {
+    if (undo?.validFor && data !== undo.validFor) setUndo(null);
+  }, [data, undo]);
   const undoSequence = useRef(0);
   const pendingFocusId = useRef<string | null>(null);
   const movieInputs = useRef(new Map<string, HTMLTextAreaElement>());
@@ -891,19 +1213,63 @@ function AdminScreen({
   } | null>(null);
   const lastIncidentId = useRef<string | null>(null);
   const [now, setNow] = useState(() => new Date());
-  // "running" only proves that a display window exists; "responding" proves
-  // that the display page itself is still fetching inventory.
+  // The badge combines three separate facts reported by the controller: a
+  // display window exists, the page in the window it opened is running and
+  // fetching, and that page has applied the stored revision. None of them
+  // shows that the picture is actually visible on the secondary monitor.
   const displayHealth = !monitorStatus?.controller
     ? "offline"
     : !monitorStatus.running
       ? "standby"
-      : monitorStatus.responding === false
-        ? "unresponsive"
-        : "online";
-  const displaySyncAt =
-    displayHealth === "online" && monitorStatus?.displaySeenAt
-      ? monitorStatus.displaySeenAt
-      : (monitorStatus?.lastSyncAt ?? null);
+      : monitorStatus.starting
+        ? "starting"
+        : monitorStatus.responding === false
+          ? "unresponsive"
+          : monitorStatus.data?.stale
+            ? "lagging"
+            : "online";
+  const displayHealthLabel = {
+    offline: "제어 연결 끊김",
+    standby: "전시 대기",
+    starting: "전시 여는 중",
+    unresponsive: "전시 응답 없음",
+    lagging: "전시 데이터 지연",
+    online: "전시 창 응답 중",
+  }[displayHealth];
+  const displayHealthDetail = {
+    offline: "서버 연결 확인 필요",
+    standby: "전시 창이 열려 있지 않음",
+    starting: "잠시 기다려 주세요",
+    unresponsive: "보조 모니터 확인 필요",
+    lagging: "전시 화면을 다시 열어 주세요",
+    online:
+      monitorStatus?.data && !monitorStatus.data.current
+        ? "데이터 반영 중"
+        : "최신 데이터 수신",
+  }[displayHealth];
+  const displayHealthHelp = {
+    offline: "관리 화면이 로컬 서버에 연결하지 못했습니다. start-local.bat를 다시 실행해 주세요.",
+    standby: "전시 창이 열려 있지 않습니다.",
+    starting: "전시 창을 여는 중입니다.",
+    unresponsive:
+      "전시 창은 열려 있지만 그 창의 화면이 데이터를 받아 가지 않습니다. 보조 모니터를 확인하고 전시 화면을 다시 열어 주세요.",
+    lagging:
+      "전시 창이 응답하고 있지만 최신 데이터를 아직 반영하지 않았습니다. 계속되면 전시 화면을 다시 열어 주세요.",
+    online:
+      "전시 창이 열려 있고 그 창의 화면이 데이터를 받아 가고 있습니다. 실제 모니터에 화면이 보이는지는 직접 확인해 주세요.",
+  }[displayHealth];
+  const displayHealthClass = {
+    offline: "offline",
+    standby: "standby",
+    starting: "standby",
+    unresponsive: "offline",
+    lagging: "offline",
+    online: "online",
+  }[displayHealth];
+  const backupProblem =
+    monitorStatus?.backup && !monitorStatus.backup.ok
+      ? (monitorStatus.backup.error?.message ?? "")
+      : null;
   const todayItems = data.items.filter(
     (item) => item.visible && getScheduleState(item, now).active,
   );
@@ -921,14 +1287,15 @@ function AdminScreen({
 
     const checkDisplayStatus = async () => {
       try {
-        const response = await fetch(
-          `${CONTROLLER_URL}/display/status`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) throw new Error("status unavailable");
-        const result = (await response.json()) as DisplayMonitorStatus;
+        const reply = await requestJson("/display/status");
+        if (!reply?.ok || !reply.body) throw new Error("status unavailable");
+        const result = reply.body as unknown as DisplayMonitorStatus;
         if (disposed) return;
         setMonitorStatus({ ...result, controller: true });
+        // Lets a window with nothing unsaved follow what was stored elsewhere.
+        if (typeof result.data?.revision === "number") {
+          onServerRevision(result.data.revision);
+        }
 
         if (
           result.abnormal &&
@@ -962,7 +1329,7 @@ function AdminScreen({
       disposed = true;
       window.clearInterval(statusTimer);
     };
-  }, []);
+  }, [onServerRevision]);
 
   useEffect(() => {
     const id = pendingFocusId.current;
@@ -982,7 +1349,6 @@ function AdminScreen({
       updatedAt: nextUpdatedAt(current.updatedAt),
       items: current.items.map((item) => item.id === id ? { ...item, ...dates } : item),
     }));
-    pulseSaved();
   };
 
   const updateItem = <K extends keyof GiftItem>(
@@ -997,8 +1363,6 @@ function AdminScreen({
         item.id === id ? { ...item, [key]: value } : item,
       ),
     }));
-    setSavedPulse(true);
-    window.setTimeout(() => setSavedPulse(false), 900);
   };
 
   const updateSettings = <K extends keyof DisplaySettings>(
@@ -1010,14 +1374,8 @@ function AdminScreen({
       updatedAt: nextUpdatedAt(current.updatedAt),
       settings: { ...current.settings, [key]: value },
     }));
-    setSavedPulse(true);
-    window.setTimeout(() => setSavedPulse(false), 900);
   };
 
-  const pulseSaved = () => {
-    setSavedPulse(true);
-    window.setTimeout(() => setSavedPulse(false), 900);
-  };
 
   const addItem = () => {
     const dates = newItemDates();
@@ -1067,7 +1425,6 @@ function AdminScreen({
         items,
       };
     });
-    pulseSaved();
   };
 
   const groupSameMovies = () => {
@@ -1076,16 +1433,16 @@ function AdminScreen({
       updatedAt: nextUpdatedAt(current.updatedAt),
       items: stableGroupItemsByMovie(current.items),
     }));
-    pulseSaved();
     showDisplayMessage("같은 영화 항목끼리 모았습니다.");
   };
 
   const offerUndo = (
     message: string,
     restore: (current: AppData) => AppData,
+    validFor?: AppData,
   ) => {
     const id = ++undoSequence.current;
-    setUndo({ id, message, restore });
+    setUndo({ id, message, restore, validFor });
     window.setTimeout(
       () => setUndo((current) => (current?.id === id ? null : current)),
       15000,
@@ -1094,13 +1451,13 @@ function AdminScreen({
 
   const applyUndo = () => {
     if (!undo) return;
-    const { restore } = undo;
+    const { restore, validFor } = undo;
     setUndo(null);
-    setData((current) => ({
+    if (validFor && data !== validFor) return;
+    setData((current) => validFor && current !== validFor ? current : ({
       ...restore(current),
       updatedAt: nextUpdatedAt(current.updatedAt),
     }));
-    pulseSaved();
   };
 
   const restoreItems = (
@@ -1167,12 +1524,20 @@ function AdminScreen({
 
   const resetToSample = () => {
     const previous = data;
-    setData((current) => ({
+    const sample = {
       ...cloneSample(),
-      updatedAt: nextUpdatedAt(current.updatedAt),
-    }));
+      updatedAt: nextUpdatedAt(previous.updatedAt),
+    };
+    // The replaced inventory stays under "보관된 버전" whatever happens next.
+    if (!onStash("reset", previous)) {
+      showDisplayMessage("현재 데이터를 보관하지 못해 초기화를 취소했습니다. 브라우저 저장 공간을 확인해 주세요.", 8000);
+      return;
+    }
+    setData(() => sample);
     setResetPromptOpen(false);
-    offerUndo("예시 데이터로 초기화했습니다.", () => previous);
+    // Undo is offered only until the next edit; after that the kept version
+    // is the way back, so later edits are never overwritten.
+    offerUndo("예시 데이터로 초기화했습니다.", () => previous, sample);
   };
 
   const toggleDay = (item: GiftItem, day: number) => {
@@ -1197,26 +1562,22 @@ function AdminScreen({
   };
 
   const requestDisplayController = async (action: "open" | "close") => {
-    const response = await fetch(`${CONTROLLER_URL}/display/${action}`, {
-      method: "POST",
-    });
-    if (!response.ok) {
-      const result = (await response.json().catch(() => ({}))) as {
-        message?: string;
-      };
-      throw new Error(result.message || `HTTP ${response.status}`);
+    // Native launch/close can take up to 18 seconds on the single-threaded
+    // controller, but must still have a bounded lifetime.
+    const reply = await requestJson(`/display/${action}`, { method: "POST" }, 25000);
+    if (!reply?.ok) {
+      throw new Error(typeof reply?.body?.message === "string"
+        ? reply.body.message : "제어 요청에 응답이 없습니다. 잠시 후 다시 시도해 주세요.");
     }
   };
 
   const openDisplay = async () => {
+    if (saveState !== "saved" || conflict) {
+      showDisplayMessage("수정 내용을 저장한 뒤 전시 화면을 열어 주세요.", 8000);
+      return;
+    }
     setDisplayAction("opening");
     try {
-      const syncResponse = await fetch(`${CONTROLLER_URL}/data`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!syncResponse.ok) throw new Error("데이터 저장 실패");
       await requestDisplayController("open");
       showDisplayMessage("모니터 2에 전시 화면을 열었습니다.");
     } catch (error) {
@@ -1288,25 +1649,35 @@ function AdminScreen({
           )}
           <span
             className={`save-state ${
-              conflict || saveFailed ? "failed" : savedPulse ? "active" : ""
+              conflict || saveState === "failed"
+                ? "failed"
+                : saveState === "pending"
+                  ? "pending"
+                  : savedPulse
+                    ? "active"
+                    : ""
             }`}
             role="status"
             title={
               conflict
                 ? "다른 창에서 먼저 저장한 데이터가 있어 이 창의 수정 내용을 저장하지 않았습니다. 수정 내용은 이 PC에 보관되어 있습니다."
-                : saveFailed
+                : saveState === "failed"
                   ? "변경 내용이 아직 SQLite에 저장되지 않았습니다. 서버 연결이 복구되면 자동으로 저장합니다."
-                  : undefined
+                  : saveState === "pending"
+                    ? "변경 내용을 저장하고 있습니다. 저장이 끝나기 전에는 창을 닫지 마세요."
+                    : undefined
             }
           >
             <i />
             {conflict
               ? "저장 충돌 · 저장 보류"
-              : saveFailed
+              : saveState === "failed"
                 ? "저장 실패 · 재시도 중"
-                : savedPulse
-                  ? "저장됨"
-                  : "자동 저장"}
+                : saveState === "pending"
+                  ? "저장 중…"
+                  : savedPulse
+                    ? "저장됨"
+                    : "자동 저장"}
           </span>
           {conflict && !conflictDialogOpen && (
             <button
@@ -1317,41 +1688,20 @@ function AdminScreen({
               충돌 해결
             </button>
           )}
-          <div
-            className={`monitor-health ${
-              displayHealth === "unresponsive" ? "offline" : displayHealth
-            }`}
-            title={
-              displayHealth === "unresponsive"
-                ? "전시 창은 열려 있지만 화면이 데이터를 받아 가지 않습니다. 보조 모니터를 확인하고 전시 화면을 다시 열어 주세요."
-                : displaySyncAt
-                  ? `마지막 동기화: ${serverDate(displaySyncAt).toLocaleString(
-                      "ko-KR",
-                    )}`
-                  : "동기화 정보 없음"
-            }
-          >
+          {backupProblem !== null && (
+            <span
+              className="backup-warning"
+              role="alert"
+              title={`자동 백업을 만들지 못했습니다. 데이터 저장은 계속되지만 백업이 최신이 아닐 수 있습니다. ${backupProblem}`}
+            >
+              자동 백업 실패
+            </span>
+          )}
+          <div className={`monitor-health ${displayHealthClass}`} title={displayHealthHelp}>
             <i />
             <span>
-              <strong>
-                {displayHealth === "offline"
-                  ? "제어 연결 끊김"
-                  : displayHealth === "online"
-                    ? "전시 정상"
-                    : displayHealth === "unresponsive"
-                      ? "전시 응답 없음"
-                      : "전시 대기"}
-              </strong>
-              <small>
-                {displayHealth === "unresponsive"
-                  ? "보조 모니터 확인 필요"
-                  : displaySyncAt
-                    ? `동기화 ${serverDate(displaySyncAt).toLocaleTimeString(
-                        "ko-KR",
-                        { hour: "2-digit", minute: "2-digit" },
-                      )}`
-                    : "동기화 확인 중"}
-              </small>
+              <strong>{displayHealthLabel}</strong>
+              <small>{displayHealthDetail}</small>
             </span>
           </div>
           <button className="monitor-button" onClick={openMonitor}>
@@ -1451,7 +1801,10 @@ function AdminScreen({
                   max="30"
                   value={data.settings.pageSeconds}
                   onChange={(event) =>
-                    updateSettings("pageSeconds", Number(event.target.value))
+                    updateSettings(
+                      "pageSeconds",
+                      Math.min(3600, Math.max(0, Number(event.target.value) || 0)),
+                    )
                   }
                 />
                 <em>초</em>
@@ -1851,6 +2204,8 @@ function AdminScreen({
               저장 위치: %LOCALAPPDATA%\CGVGiftDisplay\inventory.db · 일일
               백업: 같은 폴더의 backups · 데이터 초기화: reset-data.bat ·
               백업과 운영 구성까지 제거: clean-uninstall.bat
+              {backupProblem !== null &&
+                " · 주의: 자동 백업에 실패했습니다. backup-error.log를 확인하세요."}
             </small>
           </div>
           <button onClick={() => setResetPromptOpen(true)}>
@@ -1953,7 +2308,7 @@ function AdminScreen({
             })()}
             {conflictError && (
               <p className="conflict-error" role="alert">
-                서버에 연결하지 못했습니다. 잠시 후 다시 선택해 주세요.
+                내용을 불러오거나 보관하지 못했습니다. 서버 연결과 브라우저 저장 공간을 확인하고 다시 선택해 주세요.
               </p>
             )}
             <div className="modal-actions conflict-actions">

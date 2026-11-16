@@ -2013,3 +2013,24 @@ body.display-mode {
 .recovery-actions .recovery-delete {
   color: #b9343a;
 }
+
+/* Unsaved changes are waiting for the controller's acknowledgement. */
+.save-state.pending {
+  display: flex;
+  color: #9a6a12;
+}
+
+.save-state.pending i {
+  background: #e8a12a;
+}
+
+.backup-warning {
+  padding: 6px 10px;
+  border: 1px solid #d84a50;
+  border-radius: 8px;
+  background: #fff5f5;
+  color: #b9343a;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}

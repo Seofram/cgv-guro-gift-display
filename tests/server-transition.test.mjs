@@ -46,7 +46,7 @@ test("uses a PowerShell server without unsigned executables or Node", async () =
   // Request-origin checks and the display heartbeat are exercised against the
   // real server by the Windows workflow; this guards against their removal.
   assert.match(serverSource, /Get-RequestRejection -Request \$Request/);
-  assert.match(serverSource, /x-cgv-client/);
+  assert.match(serverSource, /x-cgv-display/);
   assert.match(sqliteSource, /PRAGMA busy_timeout/);
   // The tag job must publish whether or not the release already exists.
   assert.match(workflow, /gh release upload "\$TAG"/);
