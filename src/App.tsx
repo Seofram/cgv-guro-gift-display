@@ -2509,10 +2509,61 @@ function AdminScreen({
   );
 }
 
+// Width available to one line of notice text on the 1280px canvas: the panel
+// (1170) minus its padding (64), the number column (56) and the gap (24),
+// less a small allowance for rounding.
+const NOTICE_LINE_WIDTH = 1016;
+
+/**
+ * Returns a function telling whether a line of notice text fits the notice
+ * panel, by measuring it in the same font the panel uses. Notices can then
+ * wrap between words and use the full width, instead of breaking after a
+ * fixed number of characters. Measurements are repeated once the display
+ * font has finished loading.
+ */
+function useNoticeFits() {
+  const [probe, setProbe] = useState<HTMLSpanElement | null>(null);
+  const [fontVersion, setFontVersion] = useState(0);
+
+  useEffect(() => {
+    const element = document.createElement("span");
+    element.className = "notice-measure";
+    element.setAttribute("aria-hidden", "true");
+    document.body.appendChild(element);
+    setProbe(element);
+    const remeasure = () => setFontVersion((version) => version + 1);
+    document.fonts?.addEventListener("loadingdone", remeasure);
+    void document.fonts?.ready.then(remeasure);
+    return () => {
+      document.fonts?.removeEventListener("loadingdone", remeasure);
+      element.remove();
+    };
+  }, []);
+
+  return useMemo(() => {
+    if (!probe) return undefined;
+    const widths = new Map<string, number>();
+    return (text: string) => {
+      // The space a line breaks at is not visible, so it takes no room.
+      const visible = text.replace(/\s+$/, "");
+      let width = widths.get(visible);
+      if (width === undefined) {
+        probe.textContent = visible;
+        width = probe.offsetWidth;
+        widths.set(visible, width);
+      }
+      return width <= NOTICE_LINE_WIDTH;
+    };
+    // fontVersion: widths change when the display font replaces the fallback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probe, fontVersion]);
+}
+
 function DisplayScreen({ data }: { data: AppData }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [now, setNow] = useState(new Date());
   const [scale, setScale] = useState(1);
+  const noticeFits = useNoticeFits();
 
   useEffect(() => {
     const updateScale = () =>
@@ -2531,8 +2582,8 @@ function DisplayScreen({ data }: { data: AppData }) {
       (item) => item.visible && getScheduleState(item, now).active &&
         (data.settings.showSoldout || item.status !== "soldout"),
     );
-    return buildDisplayPages(paginateGroups(groupItems(valid), 8), data.settings.notices, data.settings.rotateNotices);
-  }, [data, now]);
+    return buildDisplayPages(paginateGroups(groupItems(valid), 8), data.settings.notices, data.settings.rotateNotices, noticeFits);
+  }, [data, now, noticeFits]);
 
   useEffect(() => {
     setPageIndex((current) => Math.min(current, pages.length - 1));

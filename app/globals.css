@@ -1265,9 +1265,24 @@ body.display-mode {
   min-width: 0;
   margin: 0;
   color: #262626;
+}
+
+/* The notice text and the hidden element that measures it share one font
+   definition, so measured line widths match what is drawn. */
+.notice-page p,
+.notice-measure {
   font-size: 32px;
   font-weight: 800;
   line-height: 48px;
+  letter-spacing: normal;
+}
+
+.notice-measure {
+  position: absolute;
+  top: 0;
+  left: -99999px;
+  visibility: hidden;
+  white-space: pre;
 }
 
 .notice-page p > span {

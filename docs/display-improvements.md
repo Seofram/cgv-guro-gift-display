@@ -35,11 +35,14 @@ exists. Rotation off preserves the regular footer. Rotation on removes that foot
 and uses the same fixed 1280 × 1024 canvas for both layouts.
 
 Notice pages use 32px bold type with 48px line height. Each page holds at most three
-entries and ten text lines. Lines conservatively wrap at 28 Unicode code points;
-long entries continue on additional pages with their original number and `계속`.
-Blank notices add no pages. Explicit line breaks are preserved. This conservative
-wrapping can leave unused horizontal space and split words; it favors consistent
-distance readability over dense typesetting. The bottom margin reserves space for
+entries and ten text lines. Lines wrap between words to the measured width of the
+notice panel (1016px of the 1280px canvas, measured in the display font and
+re-measured when that font finishes loading), so a word is never split and no line
+starts with punctuation. Only a single word wider than a whole line is split between
+characters. Where text cannot be measured (Node tests, or before the measuring
+element exists) the limit falls back to 28 Unicode code points per line.
+Long entries continue on additional pages with their original number and `계속`.
+Blank notices add no pages. Explicit line breaks are preserved. The bottom margin reserves space for
 page indicators. Page changes have no entrance animation and indicator transitions
 are disabled for reduced-motion preferences.
 
