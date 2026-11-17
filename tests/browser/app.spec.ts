@@ -1013,3 +1013,36 @@ test("backup warning stays visible through a controller outage until verified su
   await page.clock.fastForward(5000);
   await expect(page.locator(".backup-warning")).toHaveCount(0);
 });
+
+test("rotating notices wrap between words and use the width of the panel", async ({ page }) => {
+  const notices = [
+    "당일 CGV 구로 관람 티켓에 한해 수령 가능합니다. 경품 수령 후 교환은 불가합니다.",
+    "예매 고객은 티켓 표기 시간 이후 6층 매점에서 경품 수령 가능합니다. (마지막 영화 포함)",
+    "Lucky draw gifts are limited. Please show your ticket at the 6F concession stand.",
+  ];
+  await boot(page, fixture(1, true, notices), true);
+  await page.clock.fastForward(8000);
+  await expect(page.locator(".notice-page")).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  const lines = await page.locator(".notice-page p > span").evaluateAll((spans) => spans.map((span) => {
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    const scale = document.querySelector(".display-canvas")!.getBoundingClientRect().width / 1280;
+    return {
+      text: span.textContent ?? "",
+      // Width of the drawn text itself, in canvas pixels.
+      width: range.getBoundingClientRect().width / scale,
+      available: span.getBoundingClientRect().width / scale,
+    };
+  }));
+  const words = new Set(notices.flatMap((notice) => notice.split(" ")));
+  for (const line of lines) {
+    expect(line.width).toBeLessThanOrEqual(line.available);
+    expect(line.text).not.toMatch(/^[\s.,)]/);
+    for (const word of line.text.trim().split(" ")) expect(words.has(word), `"${word}" is a whole word`).toBe(true);
+  }
+  // Each notice needs two lines at this width, not three, and the first line of each fills most of the panel.
+  expect(lines).toHaveLength(6);
+  for (const index of [0, 2, 4]) expect(lines[index].width).toBeGreaterThan(lines[index].available * 0.8);
+  expect(lines.map((line) => line.text).join("")).toBe(notices.join(""));
+});
